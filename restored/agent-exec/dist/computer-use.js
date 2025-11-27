@@ -1,0 +1,3 @@
+const computerUseExecutorResource = createResource(execManager => new ExecutorResource(execManager, createServerSerializer("computerUseArgs"), createClientDeserializer("computerUseResult")), (implementation, controlledExecManager) => {
+  controlledExecManager.register(new SimpleControlledExecHandler(implementation, createServerDeserializer("computerUseArgs"), createClientSerializer("computerUseResult")));
+});
