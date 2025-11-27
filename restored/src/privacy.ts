@@ -1,38 +1,3 @@
-// EXPORTS
-__webpack_require__.d(__webpack_exports__, {
-  H: () => (/* binding */maybeRefreshPrivacyCacheInBackground)
-});
-
-// UNUSED EXPORTS: protoPrivacyToGhostMode
-
-// EXTERNAL MODULE: ../proto/dist/generated/aiserver/v1/dashboard_connect.js
-var dashboard_connect = __webpack_require__("../proto/dist/generated/aiserver/v1/dashboard_connect.js");
-// EXTERNAL MODULE: ../../node_modules/.pnpm/@connectrpc+connect@1.6.1_patch_hash=5qy7enogvswcu53n3mftrkxwei_@bufbuild+protobuf@1.10.0/node_modules/@connectrpc/connect/dist/esm/promise-client.js + 1 modules
-var promise_client = __webpack_require__("../../node_modules/.pnpm/@connectrpc+connect@1.6.1_patch_hash=5qy7enogvswcu53n3mftrkxwei_@bufbuild+protobuf@1.10.0/node_modules/@connectrpc/connect/dist/esm/promise-client.js");
-// EXTERNAL MODULE: ../../node_modules/.pnpm/@connectrpc+connect-node@1.6.1_@bufbuild+protobuf@1.10.0_@connectrpc+connect@1.6.1_patch_hash_yu5ivmw5nlvm6v3w7brw2bvqt4/node_modules/@connectrpc/connect-node/dist/esm/index.js + 26 modules
-var esm = __webpack_require__("../../node_modules/.pnpm/@connectrpc+connect-node@1.6.1_@bufbuild+protobuf@1.10.0_@connectrpc+connect@1.6.1_patch_hash_yu5ivmw5nlvm6v3w7brw2bvqt4/node_modules/@connectrpc/connect-node/dist/esm/index.js");
-// EXTERNAL MODULE: ./src/constants.ts
-var constants = __webpack_require__("./src/constants.ts");
-// EXTERNAL MODULE: ./src/debug.ts + 1 modules
-var debug = __webpack_require__("./src/debug.ts");
-; // ./src/instrument.ts
-// NOTE: This should ONLY be called for non-privacy or privacy with storage users.
-function initSentry() {
-  // TODO - ship sentry when we are confident in non-privacy -> privacy transition
-  // debugLog("Sentry disabled");
-  // const client = Sentry.getClient();
-  // if (client) {
-  // 	debugLog("Sentry already initialized");
-  // 	return;
-  // }
-  // debugLog("Initializing Sentry");
-  // Sentry.init({
-  // 	dsn: "https://8c7b8823ebc2b8b68c0de054f7d4f6a8@o4504648565915648.ingest.us.sentry.io/4509795338551296",
-  // 	environment: isDev ? "local" : "production",
-  // 	enabled: !isDev,
-  // });
-}
-; // ./src/privacy.ts
 var __awaiter = undefined && undefined.__awaiter || function (thisArg, _arguments, P, generator) {
   function adopt(value) {
     return value instanceof P ? value : new P(function (resolve) {
@@ -155,5 +120,3 @@ function maybeRefreshPrivacyCacheInBackground(args) {
     (0, debug.debugLog)("privacy.refresh.setup_error", String(e));
   }
 }
-
-/***/
