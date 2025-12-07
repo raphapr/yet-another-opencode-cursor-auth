@@ -16,6 +16,10 @@
 import { createAgentServiceClient, AgentMode } from "./lib/api/agent-service";
 import { FileCredentialManager } from "./lib/storage";
 
+// --- Constants ---
+
+const API_BASE = "https://api2.cursor.sh";
+
 // --- Types ---
 
 interface OpenAIMessage {
@@ -87,51 +91,222 @@ interface OpenAIModelsResponse {
   data: OpenAIModel[];
 }
 
-// --- Model Mapping ---
+// --- Model Details (from Cursor API) ---
 
-// Map OpenAI model names to Cursor model names
-const MODEL_MAP: Record<string, string> = {
-  // GPT models
-  "gpt-4o": "gpt-4o",
-  "gpt-4o-mini": "gpt-4o-mini",
-  "gpt-4-turbo": "gpt-4-turbo",
-  "gpt-4": "gpt-4",
-  "gpt-3.5-turbo": "gpt-3.5-turbo",
-  
-  // Claude models
-  "claude-3-5-sonnet": "claude-3.5-sonnet",
-  "claude-3-5-sonnet-20241022": "claude-3.5-sonnet",
-  "claude-3-opus": "claude-3-opus",
-  "claude-3-sonnet": "claude-3-sonnet",
-  "claude-3-haiku": "claude-3-haiku",
-  "claude-sonnet-4-20250514": "claude-sonnet-4-20250514",
-  
-  // Cursor models
-  "cursor-small": "cursor-small",
-};
+interface CursorModelDetails {
+  modelId: string;
+  displayModelId: string;
+  displayName: string;
+  displayNameShort: string;
+  aliases: string[];
+  maxMode?: boolean;
+}
 
-// Available models to advertise
-const AVAILABLE_MODELS: OpenAIModel[] = [
-  { id: "gpt-4o", object: "model", created: 1699500000, owned_by: "openai" },
-  { id: "gpt-4o-mini", object: "model", created: 1699500000, owned_by: "openai" },
-  { id: "gpt-4-turbo", object: "model", created: 1699500000, owned_by: "openai" },
-  { id: "gpt-4", object: "model", created: 1699500000, owned_by: "openai" },
-  { id: "gpt-3.5-turbo", object: "model", created: 1699500000, owned_by: "openai" },
-  { id: "claude-3-5-sonnet", object: "model", created: 1699500000, owned_by: "anthropic" },
-  { id: "claude-3-opus", object: "model", created: 1699500000, owned_by: "anthropic" },
-  { id: "claude-3-sonnet", object: "model", created: 1699500000, owned_by: "anthropic" },
-  { id: "claude-3-haiku", object: "model", created: 1699500000, owned_by: "anthropic" },
-  { id: "cursor-small", object: "model", created: 1699500000, owned_by: "cursor" },
-];
+// Cache for fetched models
+let cachedModels: CursorModelDetails[] | null = null;
+let modelsCacheTime = 0;
+const MODEL_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// --- Proto Parsing Helpers ---
+
+function decodeVarint(bytes: Uint8Array, offset: number): { value: number; newOffset: number } {
+  let value = 0;
+  let shift = 0;
+  let pos = offset;
+  
+  while (pos < bytes.length) {
+    const byte = bytes[pos];
+    value |= (byte & 0x7f) << shift;
+    pos++;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  
+  return { value, newOffset: pos };
+}
+
+function decodeString(bytes: Uint8Array, offset: number): { value: string; newOffset: number } {
+  const { value: length, newOffset: dataStart } = decodeVarint(bytes, offset);
+  const value = new TextDecoder().decode(bytes.slice(dataStart, dataStart + length));
+  return { value, newOffset: dataStart + length };
+}
+
+function parseModelDetails(bytes: Uint8Array, start: number, end: number): CursorModelDetails {
+  const model: CursorModelDetails = {
+    modelId: "",
+    displayModelId: "",
+    displayName: "",
+    displayNameShort: "",
+    aliases: [],
+  };
+  
+  let pos = start;
+  while (pos < end) {
+    const { value: tag, newOffset: afterTag } = decodeVarint(bytes, pos);
+    const fieldNumber = tag >>> 3;
+    const wireType = tag & 0x7;
+    pos = afterTag;
+    
+    if (wireType === 2) { // Length-delimited
+      const { value: str, newOffset } = decodeString(bytes, pos);
+      pos = newOffset;
+      
+      switch (fieldNumber) {
+        case 1: model.modelId = str; break;
+        case 3: model.displayModelId = str; break;
+        case 4: model.displayName = str; break;
+        case 5: model.displayNameShort = str; break;
+        case 6: model.aliases.push(str); break;
+      }
+    } else if (wireType === 0) { // Varint
+      const { value, newOffset } = decodeVarint(bytes, pos);
+      pos = newOffset;
+      
+      if (fieldNumber === 7) {
+        model.maxMode = value === 1;
+      }
+    }
+  }
+  
+  return model;
+}
+
+function parseGetUsableModelsResponse(bytes: Uint8Array): CursorModelDetails[] {
+  const models: CursorModelDetails[] = [];
+  let pos = 0;
+  
+  while (pos < bytes.length) {
+    const { value: tag, newOffset: afterTag } = decodeVarint(bytes, pos);
+    const fieldNumber = tag >>> 3;
+    const wireType = tag & 0x7;
+    pos = afterTag;
+    
+    if (fieldNumber === 1 && wireType === 2) {
+      const { value: length, newOffset: dataStart } = decodeVarint(bytes, pos);
+      const model = parseModelDetails(bytes, dataStart, dataStart + length);
+      models.push(model);
+      pos = dataStart + length;
+    } else if (wireType === 2) {
+      const { value: length, newOffset } = decodeVarint(bytes, pos);
+      pos = newOffset + length;
+    } else if (wireType === 0) {
+      const { newOffset } = decodeVarint(bytes, pos);
+      pos = newOffset;
+    }
+  }
+  
+  return models;
+}
+
+// --- Model Fetching ---
+
+async function fetchUsableModels(accessToken: string): Promise<CursorModelDetails[]> {
+  // Check cache
+  if (cachedModels && Date.now() - modelsCacheTime < MODEL_CACHE_TTL) {
+    return cachedModels;
+  }
+  
+  // GetUsableModelsRequest is empty
+  const requestBody = new Uint8Array([]);
+  
+  // Add gRPC-Web frame
+  const framedBody = new Uint8Array(5 + requestBody.length);
+  framedBody[0] = 0; // compression flag
+  const len = requestBody.length;
+  framedBody[1] = (len >> 24) & 0xff;
+  framedBody[2] = (len >> 16) & 0xff;
+  framedBody[3] = (len >> 8) & 0xff;
+  framedBody[4] = len & 0xff;
+  framedBody.set(requestBody, 5);
+  
+  const url = `${API_BASE}/aiserver.v1.AiService/GetUsableModels`;
+  
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/grpc-web+proto",
+      "Authorization": `Bearer ${accessToken}`,
+      "x-cursor-client-version": "cli-2025.11.25-d5b3271",
+      "x-ghost-mode": "false",
+      "x-request-id": crypto.randomUUID(),
+    },
+    body: framedBody,
+  });
+  
+  if (!response.ok) {
+    throw new Error(`GetUsableModels failed: ${response.status}`);
+  }
+  
+  const responseBuffer = await response.arrayBuffer();
+  const responseBytes = new Uint8Array(responseBuffer);
+  
+  if (responseBytes.length < 5) {
+    throw new Error("Response too short");
+  }
+  
+  const compressionFlag = responseBytes[0];
+  const messageLength = (responseBytes[1] << 24) | (responseBytes[2] << 16) | (responseBytes[3] << 8) | responseBytes[4];
+  
+  if (compressionFlag !== 0) {
+    throw new Error("Compressed responses not supported");
+  }
+  
+  const messageData = responseBytes.slice(5, 5 + messageLength);
+  const models = parseGetUsableModelsResponse(messageData);
+  
+  // Update cache
+  cachedModels = models;
+  modelsCacheTime = Date.now();
+  
+  return models;
+}
+
+function cursorModelToOpenAI(model: CursorModelDetails): OpenAIModel {
+  // Determine owner based on model name
+  let owned_by = "cursor";
+  const lowerName = model.displayName.toLowerCase();
+  if (lowerName.includes("claude") || lowerName.includes("opus") || lowerName.includes("sonnet")) {
+    owned_by = "anthropic";
+  } else if (lowerName.includes("gpt")) {
+    owned_by = "openai";
+  } else if (lowerName.includes("gemini")) {
+    owned_by = "google";
+  } else if (lowerName.includes("grok")) {
+    owned_by = "xai";
+  }
+  
+  return {
+    id: model.displayModelId || model.modelId,
+    object: "model",
+    created: Math.floor(Date.now() / 1000),
+    owned_by,
+  };
+}
+
+function resolveModel(requestedModel: string, models: CursorModelDetails[]): string {
+  // First, check direct match on displayModelId or modelId
+  const directMatch = models.find(m => 
+    m.displayModelId === requestedModel || 
+    m.modelId === requestedModel
+  );
+  if (directMatch) {
+    return directMatch.modelId;
+  }
+  
+  // Check aliases
+  const aliasMatch = models.find(m => m.aliases.includes(requestedModel));
+  if (aliasMatch) {
+    return aliasMatch.modelId;
+  }
+  
+  // No match found, use as-is (let Cursor API handle it)
+  return requestedModel;
+}
 
 // --- Helpers ---
 
 function generateId(): string {
   return `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
-}
-
-function mapModel(requestedModel: string): string {
-  return MODEL_MAP[requestedModel] ?? requestedModel;
 }
 
 function messagesToPrompt(messages: OpenAIMessage[]): string {
@@ -217,7 +392,17 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
     return createErrorResponse("messages is required and must be a non-empty array");
   }
   
-  const model = mapModel(body.model ?? "gpt-4o");
+  // Fetch available models and resolve the requested model
+  let model: string;
+  try {
+    const models = await fetchUsableModels(accessToken);
+    model = resolveModel(body.model ?? "auto", models);
+  } catch (err) {
+    // If model fetching fails, use the requested model as-is
+    console.warn("Failed to fetch models, using requested model directly:", err);
+    model = body.model ?? "default";
+  }
+  
   const prompt = messagesToPrompt(body.messages);
   const stream = body.stream ?? false;
   
@@ -345,18 +530,25 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   }
 }
 
-function handleModels(): Response {
-  const response: OpenAIModelsResponse = {
-    object: "list",
-    data: AVAILABLE_MODELS,
-  };
-  
-  return new Response(JSON.stringify(response), {
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
+async function handleModels(accessToken: string): Promise<Response> {
+  try {
+    const models = await fetchUsableModels(accessToken);
+    const openaiModels = models.map(cursorModelToOpenAI);
+    
+    const response: OpenAIModelsResponse = {
+      object: "list",
+      data: openaiModels,
+    };
+    
+    return new Response(JSON.stringify(response), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch (err: any) {
+    return createErrorResponse(err.message ?? "Failed to fetch models", "server_error", 500);
+  }
 }
 
 function handleCORS(): Response {
@@ -404,7 +596,7 @@ const server = Bun.serve({
     }
     
     if (url.pathname === "/v1/models" && method === "GET") {
-      return handleModels();
+      return handleModels(accessToken);
     }
     
     // Health check
