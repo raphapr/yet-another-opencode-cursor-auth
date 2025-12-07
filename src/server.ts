@@ -13,7 +13,7 @@
  *   bun run src/server.ts
  */
 
-import { createAgentServiceClient, AgentMode } from "./lib/api/agent-service";
+import { createAgentServiceClient, AgentMode, type OpenAIToolDefinition } from "./lib/api/agent-service";
 import { FileCredentialManager } from "./lib/storage";
 
 // --- Constants ---
@@ -22,9 +22,29 @@ const API_BASE = "https://api2.cursor.sh";
 
 // --- Types ---
 
+interface OpenAIToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 interface OpenAIMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+}
+
+interface OpenAITool {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, any>;
+  };
 }
 
 interface OpenAIChatRequest {
@@ -38,15 +58,18 @@ interface OpenAIChatRequest {
   presence_penalty?: number;
   stop?: string | string[];
   user?: string;
+  tools?: OpenAITool[];
+  tool_choice?: "auto" | "none" | { type: "function"; function: { name: string } };
 }
 
 interface OpenAIChatChoice {
   index: number;
   message: {
     role: "assistant";
-    content: string;
+    content: string | null;
+    tool_calls?: OpenAIToolCall[];
   };
-  finish_reason: "stop" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
 }
 
 interface OpenAIChatResponse {
@@ -62,13 +85,24 @@ interface OpenAIChatResponse {
   };
 }
 
+interface OpenAIStreamToolCallDelta {
+  index: number;
+  id?: string;
+  type?: "function";
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 interface OpenAIStreamChoice {
   index: number;
   delta: {
     role?: "assistant";
-    content?: string;
+    content?: string | null;
+    tool_calls?: OpenAIStreamToolCallDelta[];
   };
-  finish_reason: "stop" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
 }
 
 interface OpenAIStreamChunk {
@@ -413,6 +447,10 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   if (stream) {
     // Streaming response
     const encoder = new TextEncoder();
+    let isClosed = false;
+    let hasToolCalls = false;
+    let toolCallIndex = 0;
+    const toolCallIdMap: Map<string, number> = new Map(); // Map Cursor call IDs to OpenAI indices
     
     const readable = new ReadableStream({
       async start(controller) {
@@ -432,7 +470,10 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
           controller.enqueue(encoder.encode(createSSEChunk(initialChunk)));
           
           // Stream content
-          for await (const chunk of client.chatStream({ message: prompt, model, mode: AgentMode.AGENT })) {
+          const tools = body.tools as OpenAIToolDefinition[] | undefined;
+          for await (const chunk of client.chatStream({ message: prompt, model, mode: AgentMode.AGENT, tools })) {
+            if (isClosed) break;
+            
             if (chunk.type === "text" || chunk.type === "token") {
               if (chunk.content) {
                 const streamChunk: OpenAIStreamChunk = {
@@ -448,8 +489,91 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 };
                 controller.enqueue(encoder.encode(createSSEChunk(streamChunk)));
               }
+            } else if (chunk.type === "tool_call_started" && chunk.toolCall) {
+              // Map Cursor tool to OpenAI tool call format
+              hasToolCalls = true;
+              const currentIndex = toolCallIndex++;
+              toolCallIdMap.set(chunk.toolCall.callId, currentIndex);
+              
+              // Generate OpenAI-style tool call ID
+              const openaiToolCallId = `call_${chunk.toolCall.callId.replace(/-/g, "").slice(0, 24)}`;
+              
+              const toolCallChunk: OpenAIStreamChunk = {
+                id: completionId,
+                object: "chat.completion.chunk",
+                created,
+                model: body.model ?? "gpt-4o",
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: currentIndex,
+                      id: openaiToolCallId,
+                      type: "function",
+                      function: {
+                        name: chunk.toolCall.name,
+                        arguments: "", // Arguments come in partial updates or completed
+                      },
+                    }],
+                  },
+                  finish_reason: null,
+                }],
+              };
+              controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
+              
+              // Also send initial arguments if available
+              if (chunk.toolCall.arguments && chunk.toolCall.arguments !== "{}") {
+                const argsChunk: OpenAIStreamChunk = {
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: body.model ?? "gpt-4o",
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: currentIndex,
+                        function: {
+                          arguments: chunk.toolCall.arguments,
+                        },
+                      }],
+                    },
+                    finish_reason: null,
+                  }],
+                };
+                controller.enqueue(encoder.encode(createSSEChunk(argsChunk)));
+              }
+            } else if (chunk.type === "partial_tool_call" && chunk.toolCall && chunk.partialArgs) {
+              // Stream partial arguments
+              const idx = toolCallIdMap.get(chunk.toolCall.callId);
+              if (idx !== undefined) {
+                const partialChunk: OpenAIStreamChunk = {
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: body.model ?? "gpt-4o",
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: idx,
+                        function: {
+                          arguments: chunk.partialArgs,
+                        },
+                      }],
+                    },
+                    finish_reason: null,
+                  }],
+                };
+                controller.enqueue(encoder.encode(createSSEChunk(partialChunk)));
+              }
+            } else if (chunk.type === "tool_call_completed" && chunk.toolCall) {
+              // Tool call completed - we could send final args here if needed
+              // For now, just track that tool calls happened
+              hasToolCalls = true;
             } else if (chunk.type === "error") {
               // Send error in stream format
+              console.error("Cursor API error:", chunk.error);
               const errorChunk = {
                 error: {
                   message: chunk.error ?? "Unknown error",
@@ -458,31 +582,47 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
               };
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`));
               break;
+            } else if (chunk.type === "done" || chunk.type === "checkpoint") {
+              // Stream is ending
+              break;
             }
           }
           
-          // Send final chunk with finish_reason
-          const finalChunk: OpenAIStreamChunk = {
-            id: completionId,
-            object: "chat.completion.chunk",
-            created,
-            model: body.model ?? "gpt-4o",
-            choices: [{
-              index: 0,
-              delta: {},
-              finish_reason: "stop",
-            }],
-          };
-          controller.enqueue(encoder.encode(createSSEChunk(finalChunk)));
-          
-          // Send done signal
-          controller.enqueue(encoder.encode(createSSEDone()));
-          controller.close();
+          if (!isClosed) {
+            // Send final chunk with finish_reason
+            const finalChunk: OpenAIStreamChunk = {
+              id: completionId,
+              object: "chat.completion.chunk",
+              created,
+              model: body.model ?? "gpt-4o",
+              choices: [{
+                index: 0,
+                delta: {},
+                finish_reason: hasToolCalls ? "tool_calls" : "stop",
+              }],
+            };
+            controller.enqueue(encoder.encode(createSSEChunk(finalChunk)));
+            
+            // Send done signal
+            controller.enqueue(encoder.encode(createSSEDone()));
+            isClosed = true;
+            controller.close();
+          }
         } catch (err: any) {
           console.error("Stream error:", err);
-          controller.error(err);
+          if (!isClosed) {
+            isClosed = true;
+            try {
+              controller.error(err);
+            } catch {
+              // Controller may already be in error state
+            }
+          }
         }
       },
+      cancel() {
+        isClosed = true;
+      }
     });
     
     return new Response(readable, {
@@ -496,7 +636,8 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   } else {
     // Non-streaming response
     try {
-      const content = await client.chat({ message: prompt, model, mode: AgentMode.AGENT });
+      const tools = body.tools as OpenAIToolDefinition[] | undefined;
+      const content = await client.chat({ message: prompt, model, mode: AgentMode.AGENT, tools });
       
       const response: OpenAIChatResponse = {
         id: completionId,

@@ -1,0 +1,277 @@
+# Tool Calling Investigation Summary
+
+**Date**: December 7, 2025  
+**Status**: In Progress - Blocked on tool call execution
+
+## Overview
+
+This document summarizes the investigation into enabling tool calling through the Cursor Agent API proxy. The goal is to allow OpenCode to use Cursor's AI models with tool/function calling capabilities via an OpenAI-compatible API.
+
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  OpenCode   │────▶│  Proxy Server    │────▶│  Cursor Agent   │
+│  (Client)   │     │  (port 18741)    │     │  API Backend    │
+└─────────────┘     └──────────────────┘     └─────────────────┘
+                           │
+                    Translates OpenAI
+                    format to Cursor
+                    protobuf format
+```
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/server.ts` | OpenAI-compatible proxy server on port 18741 |
+| `src/lib/api/agent-service.ts` | Cursor Agent API client with protobuf encoding |
+| `cursor-agent-restored-source-code/` | Restored Cursor CLI source for reference |
+
+## Proto Message Structure
+
+### AgentRunRequest (sent to server)
+```
+AgentRunRequest:
+  field 1: conversation_state (ConversationStateStructure)
+  field 2: action (ConversationAction)
+  field 3: model_details (ModelDetails)
+  field 4: mcp_tools (McpTools)           ← Tools sent here
+  field 5: conversation_id (string)
+```
+
+### RequestContext (inside UserMessageAction)
+```
+RequestContext:
+  field 2: rules (repeated CursorRule)
+  field 4: env (RequestContextEnv)
+  field 7: tools (repeated McpToolDefinition)  ← Tools ALSO sent here
+  field 11: git_repos (repeated GitRepoInfo)
+```
+
+### McpToolDefinition
+```
+McpToolDefinition:
+  field 1: name (string)              - Combined: "provider___toolname"
+  field 2: description (string)
+  field 3: input_schema (google.protobuf.Value)
+  field 4: provider_identifier (string)
+  field 5: tool_name (string)
+```
+
+### AgentServerMessage (received from server)
+```
+AgentServerMessage:
+  field 1: interaction_update (InteractionUpdate)     ← Text & tool calls
+  field 2: exec_server_message (ExecServerMessage)    ← Tool execution requests
+  field 3: conversation_checkpoint_update             ← Completion signal
+  field 4: kv_server_message (KvServerMessage)        ← KV operations
+  field 5: exec_server_control_message
+  field 7: interaction_query
+```
+
+### InteractionUpdate (inside field 1)
+```
+InteractionUpdate:
+  field 1: text_delta (TextDeltaUpdate)
+  field 2: tool_call_started (ToolCallStartedUpdate)
+  field 3: tool_call_completed (ToolCallCompletedUpdate)
+  field 7: partial_tool_call (PartialToolCallUpdate)
+  field 8: token_delta (TokenDeltaUpdate)
+  field 14: turn_ended (TurnEndedUpdate)
+```
+
+## What's Implemented
+
+### Working Features
+1. **Basic Chat**: Text streaming works correctly without tools
+2. **Tool Encoding**: Tools encoded in both `AgentRunRequest.mcp_tools` AND `RequestContext.tools`
+3. **KV Message Handling**: Blob get/set operations are handled correctly
+4. **Checkpoint Handling**: Conversation completion detection works
+
+### Code Changes Made
+1. Added `buildRequestContext()` function that includes tools in field 7
+2. Added `encodeMcpToolDefinition()` for proper tool format
+3. Added `encodeMcpTools()` wrapper for AgentRunRequest.mcp_tools (field 4)
+4. Updated `buildChatMessage()` to pass tools to both locations
+
+## Testing Method
+
+### Start the Server
+```bash
+cd /Users/yukai/Projects/Personal/opencode-cursor-auth
+pkill -f "bun.*server.ts" 2>/dev/null || true
+nohup bun run src/server.ts > /tmp/cursor-server.log 2>&1 &
+```
+
+### Test WITHOUT Tools (Works)
+```bash
+curl -s -X POST http://localhost:18741/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Say hello"}],
+    "stream": true
+  }'
+```
+
+**Expected Output**: Streaming text response with "Hello! How can I assist you today?"
+
+### Test WITH Tools (Not Working)
+```bash
+curl -s -X POST http://localhost:18741/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Use the bash tool to run: echo hello"}],
+    "stream": true,
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "bash",
+        "description": "Execute a bash command in the terminal",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {"type": "string", "description": "The bash command to execute"}
+          },
+          "required": ["command"]
+        }
+      }
+    }]
+  }'
+```
+
+**Current Output**: Empty response (no text, no tool calls)
+
+### Check Logs
+```bash
+cat /tmp/cursor-server.log | tail -50
+```
+
+## Current Issue
+
+### Symptoms
+When tools are provided AND the user asks for tool execution:
+- **No text output** (no `field1` InteractionUpdate)
+- **No tool calls** (no `field2` tool_call_started in InteractionUpdate)
+- Only KV operations (`field4`) followed by checkpoint (`field3`)
+- Model silently completes without producing any output
+
+### Debug Log Pattern (With Tools + Tool Request)
+```
+[DEBUG] Adding 1 tools to RequestContext.tools (field 7)
+[DEBUG] Encoding 1 tools: [ "bash" ]
+[DEBUG] McpTools encoded length: 224
+[DEBUG] Server message fields: field4:2    ← KV operation
+[DEBUG] Server message fields: field4:2    ← KV operation
+[DEBUG] Server message fields: field4:2    ← KV operation
+[DEBUG] Server message fields: field4:2    ← KV operation
+[DEBUG] Server message fields: field4:2    ← KV operation
+[DEBUG] Server message fields: field3:2    ← Checkpoint (done)
+```
+
+### Debug Log Pattern (Without Tools)
+```
+[DEBUG] Server message fields: field1:2
+[DEBUG] Received interaction_update, length: 11
+[DEBUG] InteractionUpdate fields: field1           ← text_delta
+[DEBUG] Server message fields: field1:2
+[DEBUG] InteractionUpdate fields: field8           ← token_delta
+... (more text/token deltas)
+[DEBUG] Server message fields: field3:2            ← Checkpoint
+```
+
+## Hypotheses
+
+### 1. Exec Server Capability Required
+The Cursor backend may expect an exec server to be established before processing tool calls. The native client uses `ClientExecController` to handle `ExecServerMessage` from the server.
+
+**Evidence**: 
+- Native code has `execHandler = new ClientExecController(execStream, execOutputStream, controlledExecManager)`
+- We never receive `field2` (exec_server_message), suggesting server may not send tool calls without exec capability
+
+### 2. Capability Negotiation Missing
+There might be a handshake or capability negotiation that tells the server we support tool execution.
+
+**To Investigate**:
+- Look for `ExecClientControlMessage` in native code
+- Check if there's an initial capability message sent
+
+### 3. Tool Format Issue
+Our MCP tool format might not be recognized by the model, causing silent failure.
+
+**Current Format**:
+- `name`: "opencode___bash"
+- `providerIdentifier`: "opencode"
+- `toolName`: "bash"
+
+## Next Steps
+
+1. **Investigate Exec Capability Negotiation**
+   - Search for how native client establishes exec server
+   - Look for `ExecClientControlMessage` patterns
+   - Check if there's initial capability advertisement
+
+2. **Try Sending ExecClientControlMessage**
+   - May need to send a control message indicating exec support
+   - Check `ExecServerControlMessage` structure for hints
+
+3. **Alternative: Use Built-in Tools Only**
+   - Cursor has built-in tools (bash, read, edit, etc.)
+   - These might work without MCP tool definitions
+   - Test if removing custom tools and using built-in tool names works
+
+4. **Check Privacy Mode Impact**
+   - Currently using `x-ghost-mode: false`
+   - Try with different privacy settings
+
+## Reference: Native Tool Call Flow
+
+From `cursor-agent-restored-source-code/agent-client/dist/connect.js`:
+
+```javascript
+// Tools are passed in AgentRunRequest
+const promise = monitoredRequestStream.write(new agent_service_pb.AgentClientMessage({
+  message: {
+    case: "runRequest",
+    value: new agent_pb.AgentRunRequest({
+      conversationState,
+      action,
+      modelDetails,
+      mcpTools: new mcp_pb.McpTools({
+        mcpTools: protoMcpTools
+      }),
+      conversationId: options.conversationId,
+    })
+  }
+}));
+
+// Exec handler processes tool execution
+const execHandler = new ClientExecController(
+  execStream, 
+  execOutputStream, 
+  controlledExecManager
+);
+```
+
+From `cursor-agent-restored-source-code/local-exec/dist/request-context.js`:
+
+```javascript
+// Tools also added to RequestContext
+tools: mcpTools.map(tool => new mcp_pb.McpToolDefinition({
+  name: tool.name,
+  providerIdentifier: tool.providerIdentifier,
+  toolName: tool.toolName,
+  description: tool.description,
+  inputSchema: tool.inputSchema ? struct_pb.Value.fromJson(tool.inputSchema) : undefined
+}))
+```
+
+## Environment
+
+- **Platform**: macOS (darwin)
+- **Runtime**: Bun
+- **Server Port**: 18741
+- **Cursor API**: api2.cursor.sh (main), agentn.api5.cursor.sh (agent)
+- **Auth**: OAuth access token from Cursor

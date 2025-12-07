@@ -139,6 +139,129 @@ function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   return result;
 }
 
+function encodeBoolField(fieldNumber: number, value: boolean): Uint8Array {
+  const fieldTag = (fieldNumber << 3) | 0; // wire type 0 = varint
+  return new Uint8Array([fieldTag, value ? 1 : 0]);
+}
+
+function encodeDoubleField(fieldNumber: number, value: number): Uint8Array {
+  const fieldTag = (fieldNumber << 3) | 1; // wire type 1 = 64-bit
+  const buffer = new ArrayBuffer(9);
+  const view = new DataView(buffer);
+  view.setUint8(0, fieldTag);
+  view.setFloat64(1, value, true); // little-endian
+  return new Uint8Array(buffer);
+}
+
+// --- google.protobuf.Value Encoding ---
+
+/**
+ * Encode a JavaScript value as google.protobuf.Value
+ * 
+ * google.protobuf.Value oneof:
+ *   field 1: null_value (enum NullValue)
+ *   field 2: number_value (double)
+ *   field 3: string_value (string)
+ *   field 4: bool_value (bool)
+ *   field 5: struct_value (Struct)
+ *   field 6: list_value (ListValue)
+ */
+function encodeProtobufValue(value: any): Uint8Array {
+  if (value === null || value === undefined) {
+    // NullValue enum = 0
+    return encodeUint32Field(1, 0);
+  }
+  
+  if (typeof value === "number") {
+    return encodeDoubleField(2, value);
+  }
+  
+  if (typeof value === "string") {
+    return encodeStringField(3, value);
+  }
+  
+  if (typeof value === "boolean") {
+    return encodeBoolField(4, value);
+  }
+  
+  if (Array.isArray(value)) {
+    // ListValue: field 1 = repeated Value
+    const listBytes: Uint8Array[] = [];
+    for (const item of value) {
+      const itemValue = encodeProtobufValue(item);
+      listBytes.push(encodeMessageField(1, itemValue));
+    }
+    const listValue = concatBytes(...listBytes);
+    return encodeMessageField(6, listValue);
+  }
+  
+  if (typeof value === "object") {
+    // Struct: field 1 = map<string, Value> (encoded as repeated MapEntry)
+    // MapEntry: field 1 = key (string), field 2 = value (Value)
+    const structBytes: Uint8Array[] = [];
+    for (const [key, val] of Object.entries(value)) {
+      const keyBytes = encodeStringField(1, key);
+      const valBytes = encodeMessageField(2, encodeProtobufValue(val));
+      const mapEntry = concatBytes(keyBytes, valBytes);
+      structBytes.push(encodeMessageField(1, mapEntry));
+    }
+    const structValue = concatBytes(...structBytes);
+    return encodeMessageField(5, structValue);
+  }
+  
+  // Fallback: encode as string
+  return encodeStringField(3, String(value));
+}
+
+// --- MCP Tool Definition Encoding ---
+
+/**
+ * Tool definition in OpenAI format
+ */
+export interface OpenAIToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, any>;
+  };
+}
+
+/**
+ * Encode McpToolDefinition message
+ * 
+ * McpToolDefinition:
+ *   field 1: name (string) - unique identifier for the tool
+ *   field 2: description (string)
+ *   field 3: input_schema (google.protobuf.Value)
+ *   field 4: provider_identifier (string)
+ *   field 5: tool_name (string)
+ */
+function encodeMcpToolDefinition(tool: OpenAIToolDefinition, providerIdentifier: string = "opencode"): Uint8Array {
+  const toolName = tool.function.name;
+  // The name field should be the combined identifier (provider___toolname)
+  // This is how the server expects to identify the tool
+  const combinedName = `${providerIdentifier}___${toolName}`;
+  const description = tool.function.description ?? "";
+  const inputSchema = tool.function.parameters ?? { type: "object", properties: {} };
+  
+  const parts: Uint8Array[] = [
+    encodeStringField(1, combinedName),
+    encodeStringField(2, description),
+  ];
+  
+  // Encode input_schema as google.protobuf.Value
+  if (inputSchema) {
+    const schemaValue = encodeProtobufValue(inputSchema);
+    parts.push(encodeMessageField(3, schemaValue));
+  }
+  
+  parts.push(encodeStringField(4, providerIdentifier));
+  parts.push(encodeStringField(5, toolName));
+  
+  return concatBytes(...parts);
+}
+
 // --- Proto Message Builders ---
 
 /**
@@ -184,11 +307,28 @@ function buildRequestContextEnv(workspacePath: string = process.cwd()): Uint8Arr
 
 /**
  * Build RequestContext
+ * field 2: rules (repeated CursorRule) - optional
  * field 4: env (RequestContextEnv)
+ * field 7: tools (repeated McpToolDefinition) - IMPORTANT for tool calling
+ * field 11: git_repos (repeated GitRepoInfo) - optional
  */
-function buildRequestContext(workspacePath?: string): Uint8Array {
+function buildRequestContext(workspacePath?: string, tools?: OpenAIToolDefinition[]): Uint8Array {
+  const parts: Uint8Array[] = [];
+  
+  // field 4: env
   const env = buildRequestContextEnv(workspacePath);
-  return encodeMessageField(4, env);
+  parts.push(encodeMessageField(4, env));
+  
+  // field 7: tools - CRITICAL for tool calling to work!
+  if (tools && tools.length > 0) {
+    console.log(`[DEBUG] Adding ${tools.length} tools to RequestContext.tools (field 7)`);
+    for (const tool of tools) {
+      const mcpTool = encodeMcpToolDefinition(tool, "opencode");
+      parts.push(encodeMessageField(7, mcpTool));
+    }
+  }
+  
+  return concatBytes(...parts);
 }
 
 /**
@@ -242,25 +382,55 @@ function encodeEmptyConversationState(): Uint8Array {
 }
 
 /**
+ * Encode McpTools wrapper message
+ * McpTools:
+ *   field 1: mcp_tools (repeated McpToolDefinition)
+ */
+function encodeMcpTools(tools: OpenAIToolDefinition[]): Uint8Array {
+  const parts: Uint8Array[] = [];
+  for (const tool of tools) {
+    const mcpTool = encodeMcpToolDefinition(tool, "opencode");
+    parts.push(encodeMessageField(1, mcpTool));
+  }
+  return concatBytes(...parts);
+}
+
+/**
  * Encode AgentRunRequest
  * - conversation_state: field 1 (ConversationStateStructure) - required, empty for new conversation
  * - action: field 2 (ConversationAction)
  * - model_details: field 3 (ModelDetails)
+ * - mcp_tools: field 4 (McpTools) - tool definitions
  * - conversation_id: field 5 (string, optional)
  */
 function encodeAgentRunRequest(
   action: Uint8Array,
   modelDetails: Uint8Array,
-  conversationId?: string
+  conversationId?: string,
+  tools?: OpenAIToolDefinition[]
 ): Uint8Array {
   const conversationState = encodeEmptyConversationState();
   
-  return concatBytes(
+  const parts: Uint8Array[] = [
     encodeMessageField(1, conversationState),
     encodeMessageField(2, action),
     encodeMessageField(3, modelDetails),
-    conversationId ? encodeStringField(5, conversationId) : new Uint8Array(0)
-  );
+  ];
+  
+  // Add tools if provided
+  if (tools && tools.length > 0) {
+    console.log(`[DEBUG] Encoding ${tools.length} tools:`, tools.map(t => t.function.name));
+    const mcpTools = encodeMcpTools(tools);
+    console.log(`[DEBUG] McpTools encoded length: ${mcpTools.length}`);
+    parts.push(encodeMessageField(4, mcpTools));
+  }
+  
+  // Add conversation_id if provided
+  if (conversationId) {
+    parts.push(encodeStringField(5, conversationId));
+  }
+  
+  return concatBytes(...parts);
 }
 
 /**
@@ -400,12 +570,151 @@ function parseKvServerMessage(data: Uint8Array): KvServerMessage {
   return result;
 }
 
+// --- Tool Call Parsing ---
+
+/**
+ * Tool type field number to name mapping
+ * Based on agent.v1.ToolCall oneof field numbers
+ */
+const TOOL_FIELD_MAP: Record<number, { type: string; name: string }> = {
+  1: { type: "shell_tool_call", name: "bash" },
+  3: { type: "delete_tool_call", name: "delete" },
+  4: { type: "glob_tool_call", name: "glob" },
+  5: { type: "grep_tool_call", name: "grep" },
+  8: { type: "read_tool_call", name: "read" },
+  9: { type: "update_todos_tool_call", name: "todowrite" },
+  10: { type: "read_todos_tool_call", name: "todoread" },
+  12: { type: "edit_tool_call", name: "edit" },
+  13: { type: "ls_tool_call", name: "list" },
+  14: { type: "read_lints_tool_call", name: "read_lints" },
+  15: { type: "mcp_tool_call", name: "mcp" },
+  16: { type: "sem_search_tool_call", name: "semantic_search" },
+  17: { type: "create_plan_tool_call", name: "create_plan" },
+  18: { type: "web_search_tool_call", name: "web_search" },
+  19: { type: "task_tool_call", name: "task" },
+  20: { type: "list_mcp_resources_tool_call", name: "list_mcp_resources" },
+  21: { type: "read_mcp_resource_tool_call", name: "read_mcp_resource" },
+  22: { type: "apply_agent_diff_tool_call", name: "apply_diff" },
+  23: { type: "ask_question_tool_call", name: "ask_question" },
+  24: { type: "fetch_tool_call", name: "webfetch" },
+  25: { type: "switch_mode_tool_call", name: "switch_mode" },
+  26: { type: "exa_search_tool_call", name: "exa_search" },
+  27: { type: "exa_fetch_tool_call", name: "exa_fetch" },
+  28: { type: "generate_image_tool_call", name: "generate_image" },
+  29: { type: "record_screen_tool_call", name: "record_screen" },
+  30: { type: "computer_use_tool_call", name: "computer_use" },
+};
+
+/**
+ * Parse a ToolCall message to extract tool type and arguments
+ */
+function parseToolCall(data: Uint8Array): { toolType: string; name: string; arguments: Record<string, any> } {
+  const fields = parseProtoFields(data);
+  let toolType = "unknown";
+  let name = "unknown";
+  const args: Record<string, any> = {};
+  
+  for (const field of fields) {
+    const toolInfo = TOOL_FIELD_MAP[field.fieldNumber];
+    if (toolInfo && field.wireType === 2 && field.value instanceof Uint8Array) {
+      toolType = toolInfo.type;
+      name = toolInfo.name;
+      
+      // Parse the nested tool-specific message to extract arguments
+      const toolFields = parseProtoFields(field.value);
+      for (const tf of toolFields) {
+        if (tf.wireType === 2 && tf.value instanceof Uint8Array) {
+          // Try to decode as string
+          try {
+            const strValue = new TextDecoder().decode(tf.value);
+            args[`field_${tf.fieldNumber}`] = strValue;
+          } catch {
+            args[`field_${tf.fieldNumber}`] = `<binary:${tf.value.length}bytes>`;
+          }
+        } else if (tf.wireType === 0) {
+          args[`field_${tf.fieldNumber}`] = tf.value;
+        }
+      }
+      break; // Found the tool, stop
+    }
+  }
+  
+  return { toolType, name, arguments: args };
+}
+
+/**
+ * Parse ToolCallStartedUpdate message
+ * field 1: call_id (string)
+ * field 2: tool_call (ToolCall message)
+ * field 3: model_call_id (string)
+ */
+function parseToolCallStartedUpdate(data: Uint8Array): { callId: string; modelCallId: string; toolCall: { toolType: string; name: string; arguments: Record<string, any> } | null } {
+  const fields = parseProtoFields(data);
+  let callId = "";
+  let modelCallId = "";
+  let toolCall: { toolType: string; name: string; arguments: Record<string, any> } | null = null;
+  
+  for (const field of fields) {
+    if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      callId = new TextDecoder().decode(field.value);
+    } else if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      toolCall = parseToolCall(field.value);
+    } else if (field.fieldNumber === 3 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      modelCallId = new TextDecoder().decode(field.value);
+    }
+  }
+  
+  return { callId, modelCallId, toolCall };
+}
+
+/**
+ * Parse PartialToolCallUpdate message
+ * field 1: call_id (string)
+ * field 2: tool_call (ToolCall message) - optional
+ * field 3: args_text_delta (string) - partial JSON args
+ * field 4: model_call_id (string)
+ */
+function parsePartialToolCallUpdate(data: Uint8Array): { callId: string; modelCallId: string; argsTextDelta: string; toolCall: { toolType: string; name: string; arguments: Record<string, any> } | null } {
+  const fields = parseProtoFields(data);
+  let callId = "";
+  let modelCallId = "";
+  let argsTextDelta = "";
+  let toolCall: { toolType: string; name: string; arguments: Record<string, any> } | null = null;
+  
+  for (const field of fields) {
+    if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      callId = new TextDecoder().decode(field.value);
+    } else if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      toolCall = parseToolCall(field.value);
+    } else if (field.fieldNumber === 3 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      argsTextDelta = new TextDecoder().decode(field.value);
+    } else if (field.fieldNumber === 4 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      modelCallId = new TextDecoder().decode(field.value);
+    }
+  }
+  
+  return { callId, modelCallId, argsTextDelta, toolCall };
+}
+
 // --- Stream Chunk Types ---
 
+/**
+ * Tool call information extracted from Cursor's ToolCall message
+ */
+export interface ToolCallInfo {
+  callId: string;
+  modelCallId?: string;
+  toolType: string;       // e.g., "shell_tool_call", "read_tool_call", etc.
+  name: string;           // human-readable name
+  arguments: string;      // JSON string of arguments
+}
+
 export interface AgentStreamChunk {
-  type: "text" | "thinking" | "token" | "checkpoint" | "done" | "error";
+  type: "text" | "thinking" | "token" | "checkpoint" | "done" | "error" | "tool_call_started" | "tool_call_completed" | "partial_tool_call";
   content?: string;
   error?: string;
+  toolCall?: ToolCallInfo;
+  partialArgs?: string;   // For partial_tool_call updates
 }
 
 // --- Agent Service Client ---
@@ -421,6 +730,7 @@ export interface AgentChatRequest {
   model?: string;
   mode?: AgentMode;
   conversationId?: string;
+  tools?: OpenAIToolDefinition[];
 }
 
 export class AgentServiceClient {
@@ -447,7 +757,7 @@ export class AgentServiceClient {
       "x-cursor-client-version": "cli-2025.11.25-d5b3271",
       "x-cursor-client-type": "cli",
       "x-cursor-timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
-      "x-ghost-mode": "true",
+      "x-ghost-mode": "false",
     };
     
     if (requestId) {
@@ -471,14 +781,16 @@ export class AgentServiceClient {
     const mode = request.mode ?? AgentMode.AGENT;
 
     // Build RequestContext (REQUIRED for agent to work)
-    const requestContext = buildRequestContext(this.workspacePath);
+    // Include tools in RequestContext.tools (field 7) - CRITICAL for tool calling!
+    const requestContext = buildRequestContext(this.workspacePath, request.tools);
     
     // Build the message hierarchy
     const userMessage = encodeUserMessage(request.message, messageId, mode);
     const userMessageAction = encodeUserMessageAction(userMessage, requestContext);
     const conversationAction = encodeConversationAction(userMessageAction);
     const modelDetails = encodeModelDetails(model);
-    const agentRunRequest = encodeAgentRunRequest(conversationAction, modelDetails, conversationId);
+    // Pass tools to AgentRunRequest (field 4: mcp_tools)
+    const agentRunRequest = encodeAgentRunRequest(conversationAction, modelDetails, conversationId, request.tools);
     const agentClientMessage = encodeAgentClientMessage(agentRunRequest);
 
     return agentClientMessage;
@@ -541,15 +853,27 @@ export class AgentServiceClient {
   }
 
   /**
-   * Extract text from interaction_update
+   * Result of parsing an InteractionUpdate message
    */
-  private extractTextFromInteractionUpdate(data: Uint8Array): { text: string | null; isComplete: boolean } {
+  private parseInteractionUpdate(data: Uint8Array): {
+    text: string | null;
+    isComplete: boolean;
+    toolCallStarted: { callId: string; modelCallId: string; toolType: string; name: string; arguments: string } | null;
+    toolCallCompleted: { callId: string; modelCallId: string; toolType: string; name: string; arguments: string } | null;
+    partialToolCall: { callId: string; argsTextDelta: string } | null;
+  } {
     const fields = parseProtoFields(data);
+    // Log all fields in InteractionUpdate for debugging
+    console.log("[DEBUG] InteractionUpdate fields:", fields.map(f => `field${f.fieldNumber}`).join(", "));
+    
     let text: string | null = null;
     let isComplete = false;
+    let toolCallStarted: { callId: string; modelCallId: string; toolType: string; name: string; arguments: string } | null = null;
+    let toolCallCompleted: { callId: string; modelCallId: string; toolType: string; name: string; arguments: string } | null = null;
+    let partialToolCall: { callId: string; argsTextDelta: string } | null = null;
     
     for (const field of fields) {
-      // field 1 = text_delta
+      // field 1 = text_delta (TextDeltaUpdate)
       if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
         const innerFields = parseProtoFields(field.value);
         for (const innerField of innerFields) {
@@ -558,7 +882,44 @@ export class AgentServiceClient {
           }
         }
       }
-      // field 8 = token_delta
+      // field 2 = tool_call_started (ToolCallStartedUpdate)
+      else if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
+        console.log("[DEBUG] Found tool_call_started (field 2)!");
+        const parsed = parseToolCallStartedUpdate(field.value);
+        if (parsed.toolCall) {
+          toolCallStarted = {
+            callId: parsed.callId,
+            modelCallId: parsed.modelCallId,
+            toolType: parsed.toolCall.toolType,
+            name: parsed.toolCall.name,
+            arguments: JSON.stringify(parsed.toolCall.arguments),
+          };
+        }
+      }
+      // field 3 = tool_call_completed (ToolCallCompletedUpdate)
+      else if (field.fieldNumber === 3 && field.wireType === 2 && field.value instanceof Uint8Array) {
+        console.log("[DEBUG] Found tool_call_completed (field 3)!");
+        const parsed = parseToolCallStartedUpdate(field.value); // Same structure as started
+        if (parsed.toolCall) {
+          toolCallCompleted = {
+            callId: parsed.callId,
+            modelCallId: parsed.modelCallId,
+            toolType: parsed.toolCall.toolType,
+            name: parsed.toolCall.name,
+            arguments: JSON.stringify(parsed.toolCall.arguments),
+          };
+        }
+      }
+      // field 7 = partial_tool_call (PartialToolCallUpdate)
+      else if (field.fieldNumber === 7 && field.wireType === 2 && field.value instanceof Uint8Array) {
+        console.log("[DEBUG] Found partial_tool_call (field 7)!");
+        const parsed = parsePartialToolCallUpdate(field.value);
+        partialToolCall = {
+          callId: parsed.callId,
+          argsTextDelta: parsed.argsTextDelta,
+        };
+      }
+      // field 8 = token_delta (TokenDeltaUpdate)
       else if (field.fieldNumber === 8 && field.wireType === 2 && field.value instanceof Uint8Array) {
         const tokenFields = parseProtoFields(field.value);
         for (const tField of tokenFields) {
@@ -567,13 +928,14 @@ export class AgentServiceClient {
           }
         }
       }
-      // field 14 = turn_ended
+      // field 14 = turn_ended (TurnEndedUpdate)
       else if (field.fieldNumber === 14) {
+        console.log("[DEBUG] Found turn_ended (field 14)!");
         isComplete = true;
       }
     }
     
-    return { text, isComplete };
+    return { text, isComplete, toolCallStarted, toolCallCompleted, partialToolCall };
   }
 
   /**
@@ -656,38 +1018,103 @@ export class AgentServiceClient {
             // Check for trailer frame
             if ((flags ?? 0) & 0x80) {
               const trailer = new TextDecoder().decode(frameData);
+              console.log("Received trailer frame:", trailer.slice(0, 200));
               if (trailer.includes("grpc-status:") && !trailer.includes("grpc-status: 0")) {
                 const match = trailer.match(/grpc-message:\s*([^\r\n]+)/);
-                yield { type: "error", error: decodeURIComponent(match?.[1] ?? trailer) };
+                const errorMsg = decodeURIComponent(match?.[1] ?? "Unknown gRPC error");
+                console.error("gRPC error:", errorMsg);
+                yield { type: "error", error: errorMsg };
               }
               continue;
             }
 
             // Parse AgentServerMessage
             const serverMsgFields = parseProtoFields(frameData);
+            console.log("[DEBUG] Server message fields:", serverMsgFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
             
             for (const field of serverMsgFields) {
-              // field 1 = interaction_update
-              if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                const { text, isComplete } = this.extractTextFromInteractionUpdate(field.value);
-                if (text) {
-                  yield { type: "text", content: text };
+              try {
+                // field 1 = interaction_update
+                if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
+                  console.log("[DEBUG] Received interaction_update, length:", field.value.length);
+                  const parsed = this.parseInteractionUpdate(field.value);
+                  
+                  // Yield text content
+                  if (parsed.text) {
+                    yield { type: "text", content: parsed.text };
+                  }
+                  
+                  // Yield tool call started
+                  if (parsed.toolCallStarted) {
+                    yield {
+                      type: "tool_call_started",
+                      toolCall: {
+                        callId: parsed.toolCallStarted.callId,
+                        modelCallId: parsed.toolCallStarted.modelCallId,
+                        toolType: parsed.toolCallStarted.toolType,
+                        name: parsed.toolCallStarted.name,
+                        arguments: parsed.toolCallStarted.arguments,
+                      },
+                    };
+                  }
+                  
+                  // Yield tool call completed
+                  if (parsed.toolCallCompleted) {
+                    yield {
+                      type: "tool_call_completed",
+                      toolCall: {
+                        callId: parsed.toolCallCompleted.callId,
+                        modelCallId: parsed.toolCallCompleted.modelCallId,
+                        toolType: parsed.toolCallCompleted.toolType,
+                        name: parsed.toolCallCompleted.name,
+                        arguments: parsed.toolCallCompleted.arguments,
+                      },
+                    };
+                  }
+                  
+                  // Yield partial tool call updates
+                  if (parsed.partialToolCall) {
+                    yield {
+                      type: "partial_tool_call",
+                      toolCall: {
+                        callId: parsed.partialToolCall.callId,
+                        modelCallId: undefined,
+                        toolType: "partial",
+                        name: "partial",
+                        arguments: "",
+                      },
+                      partialArgs: parsed.partialToolCall.argsTextDelta,
+                    };
+                  }
+                  
+                  if (parsed.isComplete) {
+                    turnEnded = true;
+                  }
                 }
-                if (isComplete) {
+                
+                // field 3 = conversation_checkpoint_update (completion signal)
+                if (field.fieldNumber === 3 && field.wireType === 2) {
+                  yield { type: "checkpoint" };
                   turnEnded = true;
                 }
-              }
-              
-              // field 3 = conversation_checkpoint_update (completion signal)
-              if (field.fieldNumber === 3 && field.wireType === 2) {
-                yield { type: "checkpoint" };
-                turnEnded = true;
-              }
-              
-              // field 4 = kv_server_message
-              if (field.fieldNumber === 4 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                const kvMsg = parseKvServerMessage(field.value);
-                appendSeqno = await this.handleKvMessage(kvMsg, requestId, appendSeqno);
+                
+                // field 2 = exec_server_message (tool execution request)
+                if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
+                  console.log("[DEBUG] Received exec_server_message (field 2), length:", field.value.length);
+                  // Parse the ExecServerMessage to see what tool is being called
+                  const execFields = parseProtoFields(field.value);
+                  console.log("[DEBUG] exec_server_message fields:", execFields.map(f => `field${f.fieldNumber}`).join(", "));
+                  // TODO: Handle exec_server_message by executing the tool and sending response
+                }
+                
+                // field 4 = kv_server_message
+                if (field.fieldNumber === 4 && field.wireType === 2 && field.value instanceof Uint8Array) {
+                  const kvMsg = parseKvServerMessage(field.value);
+                  appendSeqno = await this.handleKvMessage(kvMsg, requestId, appendSeqno);
+                }
+              } catch (parseErr: any) {
+                console.error("Error parsing field:", field.fieldNumber, parseErr);
+                yield { type: "error", error: `Parse error in field ${field.fieldNumber}: ${parseErr.message}` };
               }
             }
           }
@@ -710,7 +1137,8 @@ export class AgentServiceClient {
         // Normal termination after turn ended
         return;
       }
-      yield { type: "error", error: err.message };
+      console.error("Agent stream error:", err.name, err.message, err.stack);
+      yield { type: "error", error: err.message || String(err) };
     }
   }
 
