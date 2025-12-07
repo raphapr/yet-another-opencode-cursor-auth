@@ -115,7 +115,7 @@ function decodeVarint(bytes: Uint8Array, offset: number): { value: number; newOf
   let pos = offset;
   
   while (pos < bytes.length) {
-    const byte = bytes[pos];
+    const byte = bytes[pos]!;
     value |= (byte & 0x7f) << shift;
     pos++;
     if ((byte & 0x80) === 0) break;
@@ -245,7 +245,7 @@ async function fetchUsableModels(accessToken: string): Promise<CursorModelDetail
   }
   
   const compressionFlag = responseBytes[0];
-  const messageLength = (responseBytes[1] << 24) | (responseBytes[2] << 16) | (responseBytes[3] << 8) | responseBytes[4];
+  const messageLength = (responseBytes[1]! << 24) | (responseBytes[2]! << 16) | (responseBytes[3]! << 8) | responseBytes[4]!;
   
   if (compressionFlag !== 0) {
     throw new Error("Compressed responses not supported");
@@ -382,7 +382,7 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   let body: OpenAIChatRequest;
   
   try {
-    body = await req.json();
+    body = await req.json() as OpenAIChatRequest;
   } catch {
     return createErrorResponse("Invalid JSON body");
   }

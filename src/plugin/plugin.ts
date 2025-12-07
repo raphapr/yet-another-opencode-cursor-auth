@@ -3,6 +3,9 @@
  *
  * An OpenCode plugin that provides OAuth authentication for Cursor's AI backend,
  * following the architecture established by opencode-gemini-auth.
+ * 
+ * This plugin starts a local OpenAI-compatible server that proxies requests
+ * to Cursor's Agent API, enabling OpenCode to use Cursor's models.
  */
 
 import { randomUUID } from "node:crypto";
@@ -15,9 +18,9 @@ import {
 } from "../lib/auth/login";
 import { CursorClient } from "../lib/api/cursor-client";
 import { listCursorModels } from "../lib/api/cursor-models";
-import { handleOpenAIChatCompletions } from "../lib/api/openai-compat";
 import { decodeJwtPayload } from "../lib/utils/jwt";
 import { refreshAccessToken } from "../lib/auth/helpers";
+import { createAgentServiceClient, AgentMode } from "../lib/api/agent-service";
 import type {
   PluginContext,
   PluginResult,
@@ -27,18 +30,20 @@ import type {
   OAuthAuthDetails,
   TokenExchangeResult,
   AuthDetails,
-  FetchInput,
 } from "./types";
 
 // --- Constants ---
 
 export const CURSOR_PROVIDER_ID = "cursor";
 
-const CURSOR_CLIENT_HEADERS = {
-  "x-cursor-client-version": "opencode-cursor-auth/0.1.0",
-  "x-cursor-client-type": "cli",
-  "x-ghost-mode": "true",
-} as const;
+// Server port for the OpenAI-compatible proxy
+const CURSOR_PROXY_PORT = 18741; // Random high port unlikely to conflict
+const CURSOR_PROXY_BASE_URL = `http://127.0.0.1:${CURSOR_PROXY_PORT}/v1`;
+
+// --- Server State ---
+
+let proxyServer: ReturnType<typeof Bun.serve> | null = null;
+let currentAccessToken: string | null = null;
 
 // --- Auth Helpers ---
 
@@ -133,68 +138,271 @@ async function refreshCursorAccessToken(
   }
 }
 
-// --- Request Handling ---
+// --- OpenAI-Compatible Proxy Server ---
 
-/**
- * Get URL string from FetchInput
- */
-function getUrlString(input: FetchInput): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (input instanceof URL) {
-    return input.toString();
-  }
-  // Request object
-  return (input as Request).url;
+interface OpenAIMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
 }
 
-/**
- * Check if a request is targeting Cursor's API
- */
-function isCursorApiRequest(input: FetchInput): boolean {
-  const url = getUrlString(input);
-  return url.includes("cursor.sh") || url.includes("api.cursor.com");
+interface OpenAIChatRequest {
+  model: string;
+  messages: OpenAIMessage[];
+  stream?: boolean;
+  temperature?: number;
+  max_tokens?: number;
 }
 
-/**
- * Check if a request is an OpenAI-style chat completions request
- */
-function isOpenAIChatRequest(input: FetchInput): boolean {
-  const url = getUrlString(input);
-  return url.includes("/v1/chat/completions");
+function generateId(): string {
+  return `chatcmpl-${randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
-/**
- * Prepare request with Cursor auth headers
- */
-function prepareCursorRequest(
-  input: FetchInput,
-  init: RequestInit | undefined,
-  accessToken: string
-): { request: FetchInput; init: RequestInit } {
-  const headers = new Headers(init?.headers ?? {});
+function messagesToPrompt(messages: OpenAIMessage[]): string {
+  const userMessages = messages.filter(m => m.role === "user");
+  const systemMessages = messages.filter(m => m.role === "system");
+  
+  let prompt = "";
+  
+  if (systemMessages.length > 0) {
+    prompt += systemMessages.map(m => m.content).join("\n") + "\n\n";
+  }
+  
+  if (userMessages.length > 0) {
+    prompt += userMessages[userMessages.length - 1]?.content ?? "";
+  }
+  
+  return prompt;
+}
 
-  // Set authorization
-  headers.set("Authorization", `Bearer ${accessToken}`);
+function createErrorResponse(message: string, type: string = "invalid_request_error", status: number = 400): Response {
+  return new Response(
+    JSON.stringify({
+      error: { message, type, param: null, code: null },
+    }),
+    {
+      status,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    }
+  );
+}
 
-  // Set Cursor-specific headers
-  for (const [key, value] of Object.entries(CURSOR_CLIENT_HEADERS)) {
-    headers.set(key, value);
+function createSSEChunk(data: object): string {
+  return `data: ${JSON.stringify(data)}\n\n`;
+}
+
+async function handleChatCompletions(req: Request): Promise<Response> {
+  if (!currentAccessToken) {
+    return createErrorResponse("No access token available", "authentication_error", 401);
   }
 
-  // Add request ID if not present
-  if (!headers.has("x-request-id")) {
-    headers.set("x-request-id", randomUUID());
+  let body: OpenAIChatRequest;
+  try {
+    body = await req.json() as OpenAIChatRequest;
+  } catch {
+    return createErrorResponse("Invalid JSON body");
   }
 
-  return {
-    request: input,
-    init: {
-      ...init,
-      headers,
+  if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+    return createErrorResponse("messages is required and must be a non-empty array");
+  }
+
+  const model = body.model ?? "auto";
+  const prompt = messagesToPrompt(body.messages);
+  const stream = body.stream ?? false;
+  
+  const client = createAgentServiceClient(currentAccessToken);
+  const completionId = generateId();
+  const created = Math.floor(Date.now() / 1000);
+
+  if (stream) {
+    const encoder = new TextEncoder();
+    
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          // Send initial chunk with role
+          controller.enqueue(encoder.encode(createSSEChunk({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+          })));
+          
+          // Stream content
+          for await (const chunk of client.chatStream({ message: prompt, model, mode: AgentMode.AGENT })) {
+            if (chunk.type === "text" || chunk.type === "token") {
+              if (chunk.content) {
+                controller.enqueue(encoder.encode(createSSEChunk({
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model,
+                  choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+                })));
+              }
+            } else if (chunk.type === "error") {
+              controller.enqueue(encoder.encode(createSSEChunk({
+                error: { message: chunk.error ?? "Unknown error", type: "server_error" },
+              })));
+              break;
+            }
+          }
+          
+          // Send final chunk
+          controller.enqueue(encoder.encode(createSSEChunk({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          })));
+          
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        } catch (err: any) {
+          controller.error(err);
+        }
+      },
+    });
+    
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } else {
+    try {
+      const content = await client.chat({ message: prompt, model, mode: AgentMode.AGENT });
+      
+      return new Response(JSON.stringify({
+        id: completionId,
+        object: "chat.completion",
+        created,
+        model,
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content },
+          finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: Math.ceil(prompt.length / 4),
+          completion_tokens: Math.ceil(content.length / 4),
+          total_tokens: Math.ceil((prompt.length + content.length) / 4),
+        },
+      }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    } catch (err: any) {
+      return createErrorResponse(err.message ?? "Unknown error", "server_error", 500);
+    }
+  }
+}
+
+async function handleModels(): Promise<Response> {
+  if (!currentAccessToken) {
+    return createErrorResponse("No access token available", "authentication_error", 401);
+  }
+
+  try {
+    const cursorClient = new CursorClient(currentAccessToken);
+    const models = await listCursorModels(cursorClient);
+    
+    const openaiModels = models.map(m => {
+      let owned_by = "cursor";
+      const lowerName = (m.displayName ?? "").toLowerCase();
+      if (lowerName.includes("claude") || lowerName.includes("opus") || lowerName.includes("sonnet")) {
+        owned_by = "anthropic";
+      } else if (lowerName.includes("gpt")) {
+        owned_by = "openai";
+      } else if (lowerName.includes("gemini")) {
+        owned_by = "google";
+      } else if (lowerName.includes("grok")) {
+        owned_by = "xai";
+      }
+      
+      return {
+        id: m.displayModelId || m.modelId,
+        object: "model",
+        created: Math.floor(Date.now() / 1000),
+        owned_by,
+      };
+    });
+    
+    return new Response(JSON.stringify({
+      object: "list",
+      data: openaiModels,
+    }), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch (err: any) {
+    return createErrorResponse(err.message ?? "Failed to fetch models", "server_error", 500);
+  }
+}
+
+function handleCORS(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "86400",
     },
-  };
+  });
+}
+
+/**
+ * Start the OpenAI-compatible proxy server
+ */
+function startProxyServer(): void {
+  if (proxyServer) {
+    return; // Already running
+  }
+
+  try {
+    proxyServer = Bun.serve({
+      port: CURSOR_PROXY_PORT,
+      async fetch(req) {
+        const url = new URL(req.url);
+        const method = req.method;
+
+        if (method === "OPTIONS") {
+          return handleCORS();
+        }
+
+        if (url.pathname === "/v1/chat/completions" && method === "POST") {
+          return handleChatCompletions(req);
+        }
+
+        if (url.pathname === "/v1/models" && method === "GET") {
+          return handleModels();
+        }
+
+        if (url.pathname === "/health" || url.pathname === "/") {
+          return new Response(JSON.stringify({ status: "ok" }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        return createErrorResponse(`Unknown endpoint: ${method} ${url.pathname}`, "not_found", 404);
+      },
+    });
+  } catch (error) {
+    console.error("[Cursor Plugin] Failed to start proxy server:", error);
+  }
 }
 
 // --- OAuth Flow Helpers ---
@@ -230,6 +438,7 @@ function openBrowser(url: string): Promise<void> {
  * - Browser-based OAuth flow with PKCE
  * - API key authentication
  * - Automatic token refresh
+ * - Local OpenAI-compatible proxy server
  */
 export const CursorOAuthPlugin = async ({
   client,
@@ -247,6 +456,18 @@ export const CursorOAuthPlugin = async ({
         return null;
       }
 
+      // Refresh token if needed
+      let authRecord = auth;
+      if (accessTokenExpired(authRecord)) {
+        const refreshed = await refreshCursorAccessToken(authRecord, client);
+        if (refreshed) {
+          authRecord = refreshed;
+        }
+      }
+
+      // Update the current access token for the proxy server
+      currentAccessToken = authRecord.access ?? null;
+
       // Set model costs to 0 (Cursor handles billing)
       if (provider.models) {
         for (const model of Object.values(provider.models)) {
@@ -256,22 +477,42 @@ export const CursorOAuthPlugin = async ({
         }
       }
 
-      // Optionally populate provider models from Cursor if available.
-      if (auth.access) {
+      // Dynamically populate provider models from Cursor API if available.
+      if (authRecord.access) {
         try {
-          const cursorClient = new CursorClient(auth.access);
+          const cursorClient = new CursorClient(authRecord.access);
           const models = await listCursorModels(cursorClient);
           if (models.length > 0) {
             provider.models = provider.models ?? {};
             for (const m of models) {
+              // Determine if this is a "thinking" (reasoning) model
+              const isThinking =
+                m.modelId?.includes("thinking") ||
+                m.displayModelId?.includes("thinking") ||
+                m.displayName?.toLowerCase().includes("thinking");
+
+              // Build model config
+              const modelConfig = {
+                name: m.displayName || m.displayNameShort || m.modelId,
+                cost: { input: 0, output: 0 },
+                temperature: true,
+                attachment: true,
+                ...(isThinking ? { reasoning: true } : {}),
+              };
+
+              // Register model under all its identifiers
               const ids = [
                 m.modelId,
                 m.displayModelId,
                 ...(m.aliases ?? []),
               ].filter((id): id is string => !!id);
+
               for (const id of ids) {
-                provider.models[id] = provider.models[id] ?? {
-                  cost: { input: 0, output: 0 },
+                // Merge with existing config if present (preserving user overrides)
+                provider.models[id] = {
+                  ...modelConfig,
+                  ...provider.models[id],
+                  cost: { input: 0, output: 0 }, // Always force cost to 0
                 };
               }
             }
@@ -284,60 +525,12 @@ export const CursorOAuthPlugin = async ({
         }
       }
 
+      // Start the proxy server
+      startProxyServer();
+
       return {
-        apiKey: "",
-
-        async fetch(input: FetchInput, init?: RequestInit): Promise<Response> {
-          // Skip non-Cursor requests
-          if (!isCursorApiRequest(input) && !isOpenAIChatRequest(input)) {
-            return fetch(input, init);
-          }
-
-          // Get latest auth state
-          let authRecord = await getAuth();
-          if (!isOAuthAuth(authRecord)) {
-            return fetch(input, init);
-          }
-
-          // Refresh token if needed
-          if (accessTokenExpired(authRecord)) {
-            const refreshed = await refreshCursorAccessToken(authRecord, client);
-            if (refreshed) {
-              authRecord = refreshed;
-            } else {
-              // Token refresh failed, try with existing token
-              console.warn(
-                "[Cursor OAuth] Token refresh failed, using existing token"
-              );
-            }
-          }
-
-          const accessToken = authRecord.access;
-          if (!accessToken) {
-            return fetch(input, init);
-          }
-
-          // Route OpenAI-compatible chat completions through the Cursor client for compatibility.
-          if (isOpenAIChatRequest(input)) {
-            const openaiResponse = await handleOpenAIChatCompletions(
-              getUrlString(input),
-              init,
-              new CursorClient(accessToken)
-            );
-            if (openaiResponse) {
-              return openaiResponse;
-            }
-          }
-
-          // Prepare authenticated request
-          const { request, init: transformedInit } = prepareCursorRequest(
-            input,
-            init,
-            accessToken
-          );
-
-          return fetch(request, transformedInit);
-        },
+        apiKey: "cursor-via-opencode", // Dummy key, not used
+        baseURL: CURSOR_PROXY_BASE_URL,
       };
     },
 
