@@ -33,6 +33,7 @@
     "demo:login": "bun run scripts/auth-demo.ts login",
     "demo:logout": "bun run scripts/auth-demo.ts logout",
     "server": "bun run src/server.ts",
+    "proxy": "bun run src/server.ts",
     "test": "bun test"
   },
   "keywords": [

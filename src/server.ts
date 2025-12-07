@@ -565,7 +565,7 @@ function handleCORS(): Response {
 
 // --- Main ---
 
-const PORT = parseInt(process.env.PORT ?? "3000", 10);
+const PORT = parseInt(process.env.PORT ?? "18741", 10);
 
 console.log("Starting OpenAI-compatible API server...");
 

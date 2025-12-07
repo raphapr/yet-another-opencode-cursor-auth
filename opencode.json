@@ -3,8 +3,11 @@
   "provider": {
     "cursor": {
       "name": "Cursor",
-      "npm": "@ai-sdk/openai",
-      "env": [],
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:18741/v1",
+        "apiKey": "cursor-via-opencode"
+      },
       "models": {
         "auto": {
           "name": "Auto",
