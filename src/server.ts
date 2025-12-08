@@ -13,7 +13,7 @@
  *   bun run src/server.ts
  */
 
-import { createAgentServiceClient, AgentMode, type OpenAIToolDefinition, type ExecRequest } from "./lib/api/agent-service";
+import { createAgentServiceClient, AgentMode, type OpenAIToolDefinition, type ExecRequest, type McpExecRequest } from "./lib/api/agent-service";
 import { FileCredentialManager } from "./lib/storage";
 
 // --- Constants ---
@@ -150,7 +150,7 @@ const MODEL_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Pending tool results keyed by OpenAI tool_call_id
 interface PendingToolResult {
-  execRequest: ExecRequest & { type: "mcp" };
+  execRequest: ExecRequest;  // Can be any exec request type now
   client: ReturnType<typeof createAgentServiceClient>;
   resolve?: (result: { content?: string; error?: string }) => void;
 }
@@ -572,8 +572,137 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 id: execReq.id,
               });
               
-              // Handle built-in exec types locally
-              if (execReq.type === 'shell') {
+              // If client provided tools, emit ALL exec_requests as tool_calls for client to execute
+              // This is the OpenAI-compatible mode
+              const clientProvidedTools = tools && tools.length > 0;
+              
+              if (clientProvidedTools && execReq.type !== 'request_context') {
+                // Convert built-in exec_request to OpenAI tool_call format
+                hasToolCalls = true;
+                const currentIndex = mcpToolCallIndex++;
+                
+                // Determine tool name and arguments based on exec type
+                let toolName: string;
+                let toolArgs: Record<string, any>;
+                
+                if (execReq.type === 'shell') {
+                  toolName = 'bash';
+                  toolArgs = { command: execReq.command };
+                  if (execReq.cwd) toolArgs.cwd = execReq.cwd;
+                } else if (execReq.type === 'read') {
+                  toolName = 'read';
+                  toolArgs = { filePath: execReq.path };
+                } else if (execReq.type === 'ls') {
+                  toolName = 'list';
+                  toolArgs = { path: execReq.path };
+                } else if (execReq.type === 'grep') {
+                  toolName = execReq.glob ? 'glob' : 'grep';
+                  toolArgs = execReq.glob 
+                    ? { pattern: execReq.glob, path: execReq.path }
+                    : { pattern: execReq.pattern, path: execReq.path };
+                } else if (execReq.type === 'mcp') {
+                  toolName = execReq.toolName;
+                  toolArgs = execReq.args;
+                } else {
+                  // Unknown type - skip
+                  console.log(`[DEBUG] Unknown exec type ${(execReq as any).type}, skipping`);
+                  continue;
+                }
+                
+                console.log(`[DEBUG] Emitting tool_call to client: ${toolName}(${JSON.stringify(toolArgs)})`);
+                
+                // Generate OpenAI-style tool call ID
+                const callIdBase = execReq.type === 'mcp' ? execReq.toolCallId : execReq.execId || String(execReq.id);
+                const openaiToolCallId = `call_${callIdBase.replace(/-/g, "").slice(0, 24)}`;
+                
+                // Send tool call chunk to OpenAI client
+                const toolCallChunk: OpenAIStreamChunk = {
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: body.model ?? "gpt-4o",
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: currentIndex,
+                        id: openaiToolCallId,
+                        type: "function",
+                        function: {
+                          name: toolName,
+                          arguments: JSON.stringify(toolArgs),
+                        },
+                      }],
+                    },
+                    finish_reason: null,
+                  }],
+                };
+                controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
+                
+                // Create a promise that will be resolved when tool result is submitted
+                const resultPromise = new Promise<{ content?: string; error?: string }>((resolve) => {
+                  pendingToolResults.set(openaiToolCallId, { 
+                    execRequest: execReq, 
+                    client,
+                    resolve
+                  });
+                });
+                console.log(`[DEBUG] Registered pending tool result for ${openaiToolCallId}`);
+                
+                // End the OpenAI stream with tool_calls finish reason
+                const toolCallsFinishChunk: OpenAIStreamChunk = {
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: body.model ?? "gpt-4o",
+                  choices: [{
+                    index: 0,
+                    delta: {},
+                    finish_reason: "tool_calls",
+                  }],
+                };
+                controller.enqueue(encoder.encode(createSSEChunk(toolCallsFinishChunk)));
+                controller.enqueue(encoder.encode(createSSEDone()));
+                
+                // Close the stream immediately - client can now proceed
+                isClosed = true;
+                controller.close();
+                
+                console.log("[DEBUG] OpenAI stream closed, waiting for tool result via multi-turn...");
+                
+                // Wait for tool result (client will send it in a new request with messages)
+                // For now, we also support /v1/tool_results endpoint for backward compatibility
+                const toolResultData = await resultPromise;
+                console.log("[DEBUG] Tool result received:", toolResultData);
+                
+                // Send tool result to Cursor based on exec type
+                if (execReq.type === 'shell') {
+                  // Parse result as shell output
+                  const content = toolResultData.content ?? "";
+                  await client.sendShellResult(execReq.id, execReq.execId, execReq.command, execReq.cwd || process.cwd(), content, "", 0, 0);
+                } else if (execReq.type === 'read') {
+                  const content = toolResultData.content ?? "";
+                  const lines = content.split('\n').length;
+                  await client.sendReadResult(execReq.id, execReq.execId, content, execReq.path, lines, BigInt(content.length), false);
+                } else if (execReq.type === 'ls') {
+                  await client.sendLsResult(execReq.id, execReq.execId, toolResultData.content ?? "");
+                } else if (execReq.type === 'grep') {
+                  // Parse grep result as file list
+                  const files = (toolResultData.content ?? "").trim().split('\n').filter(f => f.length > 0);
+                  await client.sendGrepResult(execReq.id, execReq.execId, execReq.pattern || '', execReq.path || process.cwd(), files);
+                } else if (execReq.type === 'mcp') {
+                  const mcpReq = execReq as McpExecRequest & { type: 'mcp' };
+                  if (toolResultData.error) {
+                    await client.sendToolResult(mcpReq, { error: toolResultData.error });
+                  } else {
+                    await client.sendToolResult(mcpReq, { success: { content: toolResultData.content ?? "", isError: false } });
+                  }
+                }
+                
+                console.log("[DEBUG] Sent tool result to Cursor");
+                toolExecutionCompleted = true;
+                
+              } else if (execReq.type === 'shell') {
                 // Execute shell command locally
                 console.log(`[DEBUG] Executing shell command: ${execReq.command}`);
                 const startTime = Date.now();
@@ -962,19 +1091,36 @@ async function handleToolResult(req: Request): Promise<Response> {
   }
 
   // Fallback: directly send result to Cursor (old approach)
+  // This code path is only used for backward compatibility when resolve function is not set
   const { execRequest, client } = pending;
   try {
-    if (body.is_error || body.error) {
-      await client.sendToolResult(execRequest, {
-        error: body.error ?? body.content ?? "Tool returned an error",
-      });
+    const content = body.content ?? "";
+    const isError = body.is_error ?? false;
+    
+    // Handle different exec request types
+    if (execRequest.type === 'mcp') {
+      const mcpReq = execRequest as McpExecRequest & { type: 'mcp' };
+      if (isError || body.error) {
+        await client.sendToolResult(mcpReq, {
+          error: body.error ?? content ?? "Tool returned an error",
+        });
+      } else {
+        await client.sendToolResult(mcpReq, {
+          success: { content, isError },
+        });
+      }
+    } else if (execRequest.type === 'shell') {
+      await client.sendShellResult(execRequest.id, execRequest.execId, execRequest.command, execRequest.cwd || process.cwd(), content, "", isError ? 1 : 0, 0);
+    } else if (execRequest.type === 'read') {
+      const lines = content.split('\n').length;
+      await client.sendReadResult(execRequest.id, execRequest.execId, content, execRequest.path, lines, BigInt(content.length), false);
+    } else if (execRequest.type === 'ls') {
+      await client.sendLsResult(execRequest.id, execRequest.execId, content);
+    } else if (execRequest.type === 'grep') {
+      const files = content.trim().split('\n').filter(f => f.length > 0);
+      await client.sendGrepResult(execRequest.id, execRequest.execId, execRequest.pattern || '', execRequest.path || process.cwd(), files);
     } else {
-      await client.sendToolResult(execRequest, {
-        success: {
-          content: body.content ?? "",
-          isError: body.is_error ?? false,
-        },
-      });
+      return createErrorResponse(`Unknown exec request type: ${(execRequest as any).type}`, "invalid_request", 400);
     }
 
     return new Response(JSON.stringify({ status: "ok" }), {
