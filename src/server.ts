@@ -602,14 +602,14 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                   
                   if (execReq.glob) {
                     // This is a glob search - find files matching the glob pattern
-                    // Use find command to match glob pattern
-                    const proc = Bun.spawn(['sh', '-c', `find "${searchPath}" -type f -name "${execReq.glob}" 2>/dev/null | head -100`], {
-                      stdout: 'pipe',
-                      stderr: 'pipe',
-                    });
-                    const output = await new Response(proc.stdout).text();
-                    await proc.exited;
-                    files = output.trim().split('\n').filter(f => f.length > 0);
+                    // Use Bun's glob API for proper glob support
+                    const glob = new Bun.Glob(execReq.glob);
+                    const matches: string[] = [];
+                    for await (const file of glob.scan({ cwd: searchPath, onlyFiles: true })) {
+                      matches.push(`${searchPath}/${file}`);
+                      if (matches.length >= 100) break; // Limit results
+                    }
+                    files = matches;
                     console.log(`[DEBUG] Glob found ${files.length} files`);
                   } else if (execReq.pattern) {
                     // This is a grep search - find files containing the pattern
