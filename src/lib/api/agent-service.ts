@@ -1,11 +1,11 @@
 /**
  * Cursor Agent Service Client
- * 
+ *
  * Implements the AgentService API for chat functionality.
  * Uses the BidiSse pattern:
  * - RunSSE (server-streaming) to receive responses
  * - BidiAppend (unary) to send client messages
- * 
+ *
  * Proto structure:
  * AgentClientMessage:
  *   field 1: run_request (AgentRunRequest)
@@ -14,7 +14,7 @@
  *   field 4: conversation_action (ConversationAction)
  *   field 5: exec_client_control_message
  *   field 6: interaction_response
- * 
+ *
  * AgentServerMessage:
  *   field 1: interaction_update (InteractionUpdate)
  *   field 2: exec_server_message (ExecServerMessage)
@@ -22,7 +22,7 @@
  *   field 4: kv_server_message (KvServerMessage)
  *   field 5: exec_server_control_message
  *   field 7: interaction_query
- * 
+ *
  * InteractionUpdate.message:
  *   field 1: text_delta
  *   field 4: thinking_delta
@@ -66,65 +66,65 @@ function encodeVarint(value: number | bigint): Uint8Array {
 
 function encodeStringField(fieldNumber: number, value: string): Uint8Array {
   if (!value) return new Uint8Array(0);
-  
+
   const fieldTag = (fieldNumber << 3) | 2; // wire type 2 = length-delimited
   const encoded = new TextEncoder().encode(value);
   const length = encodeVarint(encoded.length);
-  
+
   const result = new Uint8Array(1 + length.length + encoded.length);
   result[0] = fieldTag;
   result.set(length, 1);
   result.set(encoded, 1 + length.length);
-  
+
   return result;
 }
 
 function encodeUint32Field(fieldNumber: number, value: number): Uint8Array {
   if (value === 0) return new Uint8Array(0);
-  
+
   const fieldTag = (fieldNumber << 3) | 0; // wire type 0 = varint
   const encoded = encodeVarint(value);
-  
+
   const result = new Uint8Array(1 + encoded.length);
   result[0] = fieldTag;
   result.set(encoded, 1);
-  
+
   return result;
 }
 
 function encodeInt32Field(fieldNumber: number, value: number): Uint8Array {
   if (value === 0) return new Uint8Array(0);
-  
+
   const fieldTag = (fieldNumber << 3) | 0; // wire type 0 = varint
   const encoded = encodeVarint(value);
-  
+
   const result = new Uint8Array(1 + encoded.length);
   result[0] = fieldTag;
   result.set(encoded, 1);
-  
+
   return result;
 }
 
 function encodeInt64Field(fieldNumber: number, value: bigint): Uint8Array {
   const fieldTag = (fieldNumber << 3) | 0; // wire type 0 = varint
   const encoded = encodeVarint(value);
-  
+
   const result = new Uint8Array(1 + encoded.length);
   result[0] = fieldTag;
   result.set(encoded, 1);
-  
+
   return result;
 }
 
 function encodeMessageField(fieldNumber: number, data: Uint8Array): Uint8Array {
   const fieldTag = (fieldNumber << 3) | 2; // wire type 2 = length-delimited
   const length = encodeVarint(data.length);
-  
+
   const result = new Uint8Array(1 + length.length + data.length);
   result[0] = fieldTag;
   result.set(length, 1);
   result.set(data, 1 + length.length);
-  
+
   return result;
 }
 
@@ -157,7 +157,7 @@ function encodeDoubleField(fieldNumber: number, value: number): Uint8Array {
 
 /**
  * Encode a JavaScript value as google.protobuf.Value
- * 
+ *
  * google.protobuf.Value oneof:
  *   field 1: null_value (enum NullValue)
  *   field 2: number_value (double)
@@ -171,19 +171,19 @@ function encodeProtobufValue(value: any): Uint8Array {
     // NullValue enum = 0
     return encodeUint32Field(1, 0);
   }
-  
+
   if (typeof value === "number") {
     return encodeDoubleField(2, value);
   }
-  
+
   if (typeof value === "string") {
     return encodeStringField(3, value);
   }
-  
+
   if (typeof value === "boolean") {
     return encodeBoolField(4, value);
   }
-  
+
   if (Array.isArray(value)) {
     // ListValue: field 1 = repeated Value
     const listBytes: Uint8Array[] = [];
@@ -194,7 +194,7 @@ function encodeProtobufValue(value: any): Uint8Array {
     const listValue = concatBytes(...listBytes);
     return encodeMessageField(6, listValue);
   }
-  
+
   if (typeof value === "object") {
     // Struct: field 1 = map<string, Value> (encoded as repeated MapEntry)
     // MapEntry: field 1 = key (string), field 2 = value (Value)
@@ -208,7 +208,7 @@ function encodeProtobufValue(value: any): Uint8Array {
     const structValue = concatBytes(...structBytes);
     return encodeMessageField(5, structValue);
   }
-  
+
   // Fallback: encode as string
   return encodeStringField(3, String(value));
 }
@@ -229,7 +229,7 @@ export interface OpenAIToolDefinition {
 
 /**
  * Encode McpToolDefinition message
- * 
+ *
  * McpToolDefinition:
  *   field 1: name (string) - unique identifier for the tool
  *   field 2: description (string)
@@ -245,23 +245,23 @@ function encodeMcpToolDefinition(tool: OpenAIToolDefinition, providerIdentifier:
   const combinedName = `${providerIdentifier}-${toolName}`;
   const description = tool.function.description ?? "";
   const inputSchema = tool.function.parameters ?? { type: "object", properties: {} };
-  
-  console.log(`[DEBUG] Encoding tool: name=${combinedName}, providerIdentifier=${providerIdentifier}, toolName=${toolName}`);
-  
+
+  // Removed verbose tool encoding log - was spamming 40+ logs per request
+
   const parts: Uint8Array[] = [
     encodeStringField(1, combinedName),
     encodeStringField(2, description),
   ];
-  
+
   // Encode input_schema as google.protobuf.Value
   if (inputSchema) {
     const schemaValue = encodeProtobufValue(inputSchema);
     parts.push(encodeMessageField(3, schemaValue));
   }
-  
+
   parts.push(encodeStringField(4, providerIdentifier));
   parts.push(encodeStringField(5, toolName));
-  
+
   return concatBytes(...parts);
 }
 
@@ -293,7 +293,7 @@ function encodeBidiAppendRequest(data: string, requestId: string, appendSeqno: b
 /**
  * Build RequestContextEnv
  * field 1: os_version (string)
- * field 2: workspace_paths (repeated string) 
+ * field 2: workspace_paths (repeated string)
  * field 3: shell (string)
  * field 10: time_zone (string)
  * field 11: project_folder (string)
@@ -331,11 +331,11 @@ function encodeMcpInstructions(serverName: string, instructions: string): Uint8A
  */
 function buildRequestContext(workspacePath?: string, tools?: OpenAIToolDefinition[]): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // field 4: env
   const env = buildRequestContextEnv(workspacePath);
   parts.push(encodeMessageField(4, env));
-  
+
   // field 7: tools (repeated McpToolDefinition)
   // Enable tools in RequestContext - this is where Cursor expects MCP tool definitions
   // Use "cursor-tools" as provider identifier to look like a built-in tool provider
@@ -346,19 +346,19 @@ function buildRequestContext(workspacePath?: string, tools?: OpenAIToolDefinitio
       const mcpTool = encodeMcpToolDefinition(tool, MCP_PROVIDER);
       parts.push(encodeMessageField(7, mcpTool));
     }
-    
+
     // field 14: mcp_instructions - provide instructions for the MCP tools
     // Build instruction text describing all tools
-    const toolDescriptions = tools.map(t => 
+    const toolDescriptions = tools.map(t =>
       `- ${t.function.name}: ${t.function.description || 'No description'}`
     ).join('\n');
     const instructions = `You have access to the following tools:\n${toolDescriptions}\n\nUse these tools when appropriate to help the user.`;
-    
+
     const mcpInstr = encodeMcpInstructions(MCP_PROVIDER, instructions);
     parts.push(encodeMessageField(14, mcpInstr));
     console.log(`[DEBUG] Added MCP instructions for ${MCP_PROVIDER} server`);
   }
-  
+
   return concatBytes(...parts);
 }
 
@@ -417,7 +417,7 @@ function encodeEmptyConversationState(): Uint8Array {
  * Encode McpTools wrapper message
  * McpTools:
  *   field 1: mcp_tools (repeated McpToolDefinition)
- * 
+ *
  * This is a wrapper message that contains repeated tool definitions
  */
 function encodeMcpTools(tools: OpenAIToolDefinition[]): Uint8Array {
@@ -449,15 +449,15 @@ function encodeMcpDescriptor(
     encodeStringField(1, serverName),
     encodeStringField(2, serverIdentifier),
   ];
-  
+
   if (folderPath) {
     parts.push(encodeStringField(3, folderPath));
   }
-  
+
   if (serverUseInstructions) {
     parts.push(encodeStringField(4, serverUseInstructions));
   }
-  
+
   return concatBytes(...parts);
 }
 
@@ -474,17 +474,17 @@ function encodeMcpFileSystemOptions(
   mcpDescriptors: Array<{ serverName: string; serverIdentifier: string; folderPath?: string; serverUseInstructions?: string }>
 ): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // field 1: enabled
   if (enabled) {
     parts.push(encodeBoolField(1, true));
   }
-  
+
   // field 2: workspace_project_dir
   if (workspaceProjectDir) {
     parts.push(encodeStringField(2, workspaceProjectDir));
   }
-  
+
   // field 3: mcp_descriptors (repeated)
   for (const descriptor of mcpDescriptors) {
     const encodedDescriptor = encodeMcpDescriptor(
@@ -495,7 +495,7 @@ function encodeMcpFileSystemOptions(
     );
     parts.push(encodeMessageField(3, encodedDescriptor));
   }
-  
+
   return concatBytes(...parts);
 }
 
@@ -523,13 +523,13 @@ function encodeAgentRunRequest(
   workspacePath?: string
 ): Uint8Array {
   const conversationState = encodeEmptyConversationState();
-  
+
   const parts: Uint8Array[] = [
     encodeMessageField(1, conversationState),
     encodeMessageField(2, action),
     encodeMessageField(3, modelDetails),
   ];
-  
+
   // field 4: mcp_tools (McpTools wrapper)
   // This mirrors how Cursor builds AgentRunRequest - tools go in BOTH:
   // 1. RequestContext.tools (field 7) - already added in buildRequestContext
@@ -539,12 +539,12 @@ function encodeAgentRunRequest(
     parts.push(encodeMessageField(4, mcpToolsWrapper));
     console.log(`[DEBUG] Added mcp_tools (field 4) to AgentRunRequest with ${tools.length} tools`);
   }
-  
+
   // Add conversation_id if provided (field 5)
   if (conversationId) {
     parts.push(encodeStringField(5, conversationId));
   }
-  
+
   // field 6: mcp_file_system_options
   // This enables MCP tool execution - provides workspace context and descriptor info
   if (tools && tools.length > 0 && workspacePath) {
@@ -559,7 +559,7 @@ function encodeAgentRunRequest(
     parts.push(encodeMessageField(6, mcpFsOptions));
     console.log(`[DEBUG] Added mcp_file_system_options (field 6) with workspace: ${workspacePath}`);
   }
-  
+
   return concatBytes(...parts);
 }
 
@@ -607,33 +607,33 @@ function decodeVarint(data: Uint8Array, offset: number): { value: number; bytesR
   let value = 0;
   let shift = 0;
   let bytesRead = 0;
-  
+
   while (offset + bytesRead < data.length) {
     const byte = data[offset + bytesRead];
     if (byte === undefined) break;
     value |= (byte & 0x7f) << shift;
     bytesRead++;
-    
+
     if ((byte & 0x80) === 0) {
       break;
     }
     shift += 7;
   }
-  
+
   return { value, bytesRead };
 }
 
 function parseProtoFields(data: Uint8Array): ParsedField[] {
   const fields: ParsedField[] = [];
   let offset = 0;
-  
+
   while (offset < data.length) {
     const tagInfo = decodeVarint(data, offset);
     offset += tagInfo.bytesRead;
-    
+
     const fieldNumber = tagInfo.value >> 3;
     const wireType = tagInfo.value & 0x7;
-    
+
     if (wireType === 2) { // length-delimited
       const lengthInfo = decodeVarint(data, offset);
       offset += lengthInfo.bytesRead;
@@ -656,7 +656,7 @@ function parseProtoFields(data: Uint8Array): ParsedField[] {
       break;
     }
   }
-  
+
   return fields;
 }
 
@@ -672,7 +672,7 @@ interface KvServerMessage {
 function parseKvServerMessage(data: Uint8Array): KvServerMessage {
   const fields = parseProtoFields(data);
   const result: KvServerMessage = { id: 0, messageType: 'unknown' };
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 0) {
       result.id = field.value as number;
@@ -696,7 +696,7 @@ function parseKvServerMessage(data: Uint8Array): KvServerMessage {
       }
     }
   }
-  
+
   return result;
 }
 
@@ -770,10 +770,10 @@ export interface GrepExecRequest {
 /**
  * Union type for all exec requests
  */
-export type ExecRequest = 
+export type ExecRequest =
   | (McpExecRequest & { type: 'mcp' })
-  | ShellExecRequest 
-  | LsExecRequest 
+  | ShellExecRequest
+  | LsExecRequest
   | RequestContextExecRequest
   | ReadExecRequest
   | GrepExecRequest;
@@ -783,7 +783,7 @@ export type ExecRequest =
  */
 function parseProtobufValue(data: Uint8Array): any {
   const fields = parseProtoFields(data);
-  
+
   for (const field of fields) {
     // null_value = field 1 (varint, NullValue enum)
     if (field.fieldNumber === 1 && field.wireType === 0) {
@@ -811,7 +811,7 @@ function parseProtobufValue(data: Uint8Array): any {
       return parseProtobufListValue(field.value);
     }
   }
-  
+
   return undefined;
 }
 
@@ -821,14 +821,14 @@ function parseProtobufValue(data: Uint8Array): any {
 function parseProtobufStruct(data: Uint8Array): Record<string, any> {
   const fields = parseProtoFields(data);
   const result: Record<string, any> = {};
-  
+
   for (const field of fields) {
     // field 1 = repeated MapEntry (fields: field 1 = key, field 2 = value)
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       const entryFields = parseProtoFields(field.value);
       let key = "";
       let value: any = undefined;
-      
+
       for (const ef of entryFields) {
         if (ef.fieldNumber === 1 && ef.wireType === 2 && ef.value instanceof Uint8Array) {
           key = new TextDecoder().decode(ef.value);
@@ -837,13 +837,13 @@ function parseProtobufStruct(data: Uint8Array): Record<string, any> {
           value = parseProtobufValue(ef.value);
         }
       }
-      
+
       if (key) {
         result[key] = value;
       }
     }
   }
-  
+
   return result;
 }
 
@@ -853,14 +853,14 @@ function parseProtobufStruct(data: Uint8Array): Record<string, any> {
 function parseProtobufListValue(data: Uint8Array): any[] {
   const fields = parseProtoFields(data);
   const result: any[] = [];
-  
+
   for (const field of fields) {
     // field 1 = repeated Value
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       result.push(parseProtobufValue(field.value));
     }
   }
-  
+
   return result;
 }
 
@@ -880,7 +880,7 @@ function parseMcpArgs(data: Uint8Array): Omit<McpExecRequest, 'id' | 'execId'> {
   let toolCallId = "";
   let providerIdentifier = "";
   let toolName = "";
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       name = new TextDecoder().decode(field.value);
@@ -889,7 +889,7 @@ function parseMcpArgs(data: Uint8Array): Omit<McpExecRequest, 'id' | 'execId'> {
       const entryFields = parseProtoFields(field.value);
       let key = "";
       let value: any = undefined;
-      
+
       for (const ef of entryFields) {
         if (ef.fieldNumber === 1 && ef.wireType === 2 && ef.value instanceof Uint8Array) {
           key = new TextDecoder().decode(ef.value);
@@ -898,7 +898,7 @@ function parseMcpArgs(data: Uint8Array): Omit<McpExecRequest, 'id' | 'execId'> {
           value = parseProtobufValue(ef.value);
         }
       }
-      
+
       if (key) {
         args[key] = value;
       }
@@ -910,7 +910,7 @@ function parseMcpArgs(data: Uint8Array): Omit<McpExecRequest, 'id' | 'execId'> {
       toolName = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { name, args, toolCallId, providerIdentifier, toolName };
 }
 
@@ -920,7 +920,7 @@ function parseMcpArgs(data: Uint8Array): Omit<McpExecRequest, 'id' | 'execId'> {
 const EXEC_MESSAGE_TYPES: Record<number, string> = {
   2: "shell_args",
   3: "write_args",
-  4: "delete_args", 
+  4: "delete_args",
   5: "grep_args",
   7: "read_args",
   8: "ls_args",
@@ -946,7 +946,7 @@ function parseShellArgs(data: Uint8Array): { command: string; cwd?: string } {
   const fields = parseProtoFields(data);
   let command = '';
   let cwd: string | undefined;
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       command = new TextDecoder().decode(field.value);
@@ -954,7 +954,7 @@ function parseShellArgs(data: Uint8Array): { command: string; cwd?: string } {
       cwd = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { command, cwd };
 }
 
@@ -966,13 +966,13 @@ function parseShellArgs(data: Uint8Array): { command: string; cwd?: string } {
 function parseLsArgs(data: Uint8Array): { path: string } {
   const fields = parseProtoFields(data);
   let path = process.cwd();
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       path = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { path };
 }
 
@@ -984,13 +984,13 @@ function parseLsArgs(data: Uint8Array): { path: string } {
 function parseReadArgs(data: Uint8Array): { path: string } {
   const fields = parseProtoFields(data);
   let path = '';
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       path = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { path };
 }
 
@@ -1006,7 +1006,7 @@ function parseGrepArgs(data: Uint8Array): { pattern: string; path?: string; glob
   let pattern = '';
   let path: string | undefined;
   let glob: string | undefined;
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       pattern = new TextDecoder().decode(field.value);
@@ -1016,7 +1016,7 @@ function parseGrepArgs(data: Uint8Array): { pattern: string; path?: string; glob
       glob = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { pattern, path, glob };
 }
 
@@ -1036,7 +1036,7 @@ function parseExecServerMessage(data: Uint8Array): ExecRequest | null {
   let id = 0;
   let execId: string | undefined = undefined;
   let result: ExecRequest | null = null;
-  
+
   // First pass: get id and execId
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 0) {
@@ -1045,11 +1045,11 @@ function parseExecServerMessage(data: Uint8Array): ExecRequest | null {
       execId = new TextDecoder().decode(field.value);
     }
   }
-  
+
   // Second pass: get the exec type
   for (const field of fields) {
     if (field.wireType !== 2 || !(field.value instanceof Uint8Array)) continue;
-    
+
     switch (field.fieldNumber) {
       case 2: // shell_args
       case 14: { // shell_stream_args
@@ -1082,13 +1082,13 @@ function parseExecServerMessage(data: Uint8Array): ExecRequest | null {
         break;
       }
     }
-    
+
     if (result) {
       console.log(`[DEBUG] Parsed ExecServerMessage: type=${result.type}, id=${id}`);
       break;
     }
   }
-  
+
   return result;
 }
 
@@ -1118,16 +1118,16 @@ function encodeMcpToolResultContentItem(text: string): Uint8Array {
  */
 function encodeMcpSuccess(content: string, isError: boolean = false): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // Add content item
   const contentItem = encodeMcpToolResultContentItem(content);
   parts.push(encodeMessageField(1, contentItem));
-  
+
   // Add is_error if true
   if (isError) {
     parts.push(encodeBoolField(2, true));
   }
-  
+
   return concatBytes(...parts);
 }
 
@@ -1152,7 +1152,7 @@ function encodeMcpResult(result: { success?: { content: string; isError?: boolea
     const error = encodeMcpError(result.error);
     return encodeMessageField(2, error);
   }
-  
+
   // Default to empty success
   return encodeMessageField(1, encodeMcpSuccess(""));
 }
@@ -1170,19 +1170,19 @@ function buildExecClientMessage(
   result: { success?: { content: string; isError?: boolean }; error?: string }
 ): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // field 1: id
   parts.push(encodeUint32Field(1, id));
-  
+
   // field 15: exec_id (optional)
   if (execId) {
     parts.push(encodeStringField(15, execId));
   }
-  
+
   // field 11: mcp_result
   const mcpResult = encodeMcpResult(result);
   parts.push(encodeMessageField(11, mcpResult));
-  
+
   return concatBytes(...parts);
 }
 
@@ -1238,7 +1238,7 @@ function encodeShellResult(command: string, cwd: string, stdout: string, stderr:
     encodeStringField(6, stderr),
     executionTimeMs ? encodeInt32Field(7, executionTimeMs) : new Uint8Array(0),
   );
-  
+
   // Wrap in ShellResult - field 1 for success, field 2 for failure
   const resultField = exitCode === 0 ? 1 : 2;
   return encodeMessageField(resultField, shellOutcome);
@@ -1252,11 +1252,11 @@ function encodeShellResult(command: string, cwd: string, stdout: string, stderr:
  *   field 2: shell_result (ShellResult) - oneof message
  */
 function buildExecClientMessageWithShellResult(
-  id: number, 
-  execId: string | undefined, 
+  id: number,
+  execId: string | undefined,
   command: string,
   cwd: string,
-  stdout: string, 
+  stdout: string,
   stderr: string,
   exitCode: number,
   executionTimeMs?: number
@@ -1313,7 +1313,7 @@ function encodeRequestContextResult(): Uint8Array {
   const osVersion = `darwin ${require('os').release()}`;
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const shell = process.env.SHELL || '/bin/zsh';
-  
+
   // RequestContextEnv
   const env = concatBytes(
     encodeStringField(1, osVersion),
@@ -1322,13 +1322,13 @@ function encodeRequestContextResult(): Uint8Array {
     encodeStringField(10, timeZone),
     encodeStringField(11, cwd),
   );
-  
+
   // RequestContext
   const requestContext = encodeMessageField(4, env);
-  
+
   // RequestContextSuccess
   const success = encodeMessageField(1, requestContext);
-  
+
   // RequestContextResult
   return encodeMessageField(1, success);
 }
@@ -1358,7 +1358,7 @@ function buildExecClientMessageWithRequestContextResult(id: number, execId: stri
  *   field 3: rejected (ReadRejected) - oneof result
  *   field 4: file_not_found (ReadFileNotFound) - oneof result
  *   field 5: permission_denied (ReadPermissionDenied) - oneof result
- * 
+ *
  * ReadSuccess:
  *   field 1: path (string) - the file path that was read
  *   field 2: content (string) - oneof output (for text files)
@@ -1369,28 +1369,28 @@ function buildExecClientMessageWithRequestContextResult(id: number, execId: stri
  */
 function encodeReadResult(content: string, path: string, totalLines?: number, fileSize?: bigint, truncated?: boolean): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // field 1: path (required)
   parts.push(encodeStringField(1, path));
-  
+
   // field 2: content (oneof output - for text files)
   parts.push(encodeStringField(2, content));
-  
+
   // field 3: total_lines
   if (totalLines !== undefined && totalLines > 0) {
     parts.push(encodeInt32Field(3, totalLines));
   }
-  
+
   // field 4: file_size
   if (fileSize !== undefined) {
     parts.push(encodeInt64Field(4, fileSize));
   }
-  
+
   // field 6: truncated
   if (truncated) {
     parts.push(encodeBoolField(6, true));
   }
-  
+
   const readSuccess = concatBytes(...parts);
   return encodeMessageField(1, readSuccess);
 }
@@ -1403,9 +1403,9 @@ function encodeReadResult(content: string, path: string, totalLines?: number, fi
  *   field 7: read_result (ReadResult) - oneof message
  */
 function buildExecClientMessageWithReadResult(
-  id: number, 
-  execId: string | undefined, 
-  content: string, 
+  id: number,
+  execId: string | undefined,
+  content: string,
   path: string,
   totalLines?: number,
   fileSize?: bigint,
@@ -1430,20 +1430,20 @@ function buildExecClientMessageWithReadResult(
  */
 function encodeGrepFilesResult(files: string[], totalFiles: number, truncated: boolean = false): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // field 1: files (repeated string)
   for (const file of files) {
     parts.push(encodeStringField(1, file));
   }
-  
+
   // field 2: total_files
   parts.push(encodeInt32Field(2, totalFiles));
-  
+
   // field 3: client_truncated
   if (truncated) {
     parts.push(encodeBoolField(3, true));
   }
-  
+
   return concatBytes(...parts);
 }
 
@@ -1467,16 +1467,16 @@ function encodeGrepUnionResult(files: string[], totalFiles: number, truncated: b
  */
 function encodeGrepSuccess(pattern: string, path: string, files: string[]): Uint8Array {
   const parts: Uint8Array[] = [];
-  
+
   // field 1: pattern
   parts.push(encodeStringField(1, pattern));
-  
+
   // field 2: path
   parts.push(encodeStringField(2, path));
-  
+
   // field 3: output_mode
   parts.push(encodeStringField(3, "files_with_matches"));
-  
+
   // field 4: workspace_results - map entry: key=path, value=GrepUnionResult
   // Map entry: field 1 = key (string), field 2 = value (GrepUnionResult)
   const unionResult = encodeGrepUnionResult(files, files.length);
@@ -1485,7 +1485,7 @@ function encodeGrepSuccess(pattern: string, path: string, files: string[]): Uint
     encodeMessageField(2, unionResult)
   );
   parts.push(encodeMessageField(4, mapEntry));
-  
+
   return concatBytes(...parts);
 }
 
@@ -1634,27 +1634,27 @@ function parseToolCall(data: Uint8Array): { toolType: string; name: string; argu
   let toolType = "unknown";
   let name = "unknown";
   const args: Record<string, any> = {};
-  
+
   for (const field of fields) {
     const toolInfo = TOOL_FIELD_MAP[field.fieldNumber];
     if (toolInfo && field.wireType === 2 && field.value instanceof Uint8Array) {
       toolType = toolInfo.type;
       name = toolInfo.name;
-      
+
       // Get the argument schema for this tool type
       const argSchema = TOOL_ARG_SCHEMA[toolType] || {};
-      
+
       // Parse the nested tool-specific message to extract arguments
       const toolFields = parseProtoFields(field.value);
       for (const tf of toolFields) {
         // Get the proper argument name from schema, or fall back to field_N
         const argName = argSchema[tf.fieldNumber] || `field_${tf.fieldNumber}`;
-        
+
         if (tf.wireType === 2 && tf.value instanceof Uint8Array) {
           // Try to decode as string first
           try {
             let strValue = new TextDecoder().decode(tf.value);
-            
+
             // Check if this looks like a nested protobuf message (starts with field tag)
             // Common pattern: field 1 (tag 0x0a) followed by length then string
             if (tf.value.length > 2 && tf.value[0] === 0x0a) {
@@ -1667,7 +1667,7 @@ function parseToolCall(data: Uint8Array): { toolType: string; name: string; argu
                 }
               }
             }
-            
+
             args[argName] = strValue;
           } catch {
             args[argName] = `<binary:${tf.value.length}bytes>`;
@@ -1685,7 +1685,7 @@ function parseToolCall(data: Uint8Array): { toolType: string; name: string; argu
       break; // Found the tool, stop
     }
   }
-  
+
   return { toolType, name, arguments: args };
 }
 
@@ -1700,7 +1700,7 @@ function parseToolCallStartedUpdate(data: Uint8Array): { callId: string; modelCa
   let callId = "";
   let modelCallId = "";
   let toolCall: { toolType: string; name: string; arguments: Record<string, any> } | null = null;
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       callId = new TextDecoder().decode(field.value);
@@ -1710,7 +1710,7 @@ function parseToolCallStartedUpdate(data: Uint8Array): { callId: string; modelCa
       modelCallId = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { callId, modelCallId, toolCall };
 }
 
@@ -1727,7 +1727,7 @@ function parsePartialToolCallUpdate(data: Uint8Array): { callId: string; modelCa
   let modelCallId = "";
   let argsTextDelta = "";
   let toolCall: { toolType: string; name: string; arguments: Record<string, any> } | null = null;
-  
+
   for (const field of fields) {
     if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
       callId = new TextDecoder().decode(field.value);
@@ -1739,7 +1739,7 @@ function parsePartialToolCallUpdate(data: Uint8Array): { callId: string; modelCa
       modelCallId = new TextDecoder().decode(field.value);
     }
   }
-  
+
   return { callId, modelCallId, argsTextDelta, toolCall };
 }
 
@@ -1786,7 +1786,7 @@ export class AgentServiceClient {
   private accessToken: string;
   private workspacePath: string;
   private blobStore: Map<string, Uint8Array>;
-  
+
   // For tool result submission during streaming
   private currentRequestId: string | null = null;
   private currentAppendSeqno: bigint = 0n;
@@ -1802,7 +1802,7 @@ export class AgentServiceClient {
 
   private getHeaders(requestId?: string): Record<string, string> {
     const checksum = generateChecksum(this.accessToken);
-    
+
     const headers: Record<string, string> = {
       "authorization": `Bearer ${this.accessToken}`,
       "content-type": "application/grpc-web+proto",
@@ -1813,11 +1813,11 @@ export class AgentServiceClient {
       "x-cursor-timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
       "x-ghost-mode": "false",
     };
-    
+
     if (requestId) {
       headers["x-request-id"] = requestId;
     }
-    
+
     return headers;
   }
 
@@ -1837,7 +1837,7 @@ export class AgentServiceClient {
     // Build RequestContext (REQUIRED for agent to work)
     // Include tools in RequestContext.tools (field 7) - CRITICAL for tool calling!
     const requestContext = buildRequestContext(this.workspacePath, request.tools);
-    
+
     // Build the message hierarchy
     const userMessage = encodeUserMessage(request.message, messageId, mode);
     const userMessageAction = encodeUserMessageAction(userMessage, requestContext);
@@ -1854,18 +1854,23 @@ export class AgentServiceClient {
    * Call BidiAppend to send a client message
    */
   private async bidiAppend(requestId: string, appendSeqno: bigint, data: Uint8Array): Promise<void> {
+    const startTime = Date.now();
     const hexData = Buffer.from(data).toString("hex");
     const appendRequest = encodeBidiAppendRequest(hexData, requestId, appendSeqno);
     const envelope = addConnectEnvelope(appendRequest);
-    
+
+    console.log(`[TIMING] bidiAppend: data=${data.length}bytes, hex=${hexData.length}chars, envelope=${envelope.length}bytes, encode=${Date.now() - startTime}ms`);
+
     const url = `${this.baseUrl}/aiserver.v1.BidiService/BidiAppend`;
-    
+
+    const fetchStart = Date.now();
     const response = await fetch(url, {
       method: "POST",
       headers: this.getHeaders(requestId),
       body: Buffer.from(envelope),
     });
-    
+    console.log(`[TIMING] bidiAppend fetch took ${Date.now() - fetchStart}ms, status=${response.status}`);
+
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error(`BidiAppend failed: ${response.status} - ${errorText}`);
@@ -1876,25 +1881,25 @@ export class AgentServiceClient {
    * Handle KV server message and send response
    */
   private async handleKvMessage(
-    kvMsg: KvServerMessage, 
-    requestId: string, 
+    kvMsg: KvServerMessage,
+    requestId: string,
     appendSeqno: bigint
   ): Promise<bigint> {
     if (kvMsg.messageType === 'get_blob_args' && kvMsg.blobId) {
       const key = this.blobIdToKey(kvMsg.blobId);
       const data = this.blobStore.get(key);
-      
+
       // GetBlobResult: field 1 = blob_data (bytes, optional)
       const result = data ? encodeMessageField(1, data) : new Uint8Array(0);
       const kvClientMsg = buildKvClientMessage(kvMsg.id, 'get_blob_result', result);
       const responseMsg = buildAgentClientMessageWithKv(kvClientMsg);
-      
+
       await this.bidiAppend(requestId, appendSeqno, responseMsg);
       return appendSeqno + 1n;
     } else if (kvMsg.messageType === 'set_blob_args' && kvMsg.blobId && kvMsg.blobData) {
       const key = this.blobIdToKey(kvMsg.blobId);
       this.blobStore.set(key, kvMsg.blobData);
-      
+
       // Debug: try to decode blob data as text to see what it contains
       try {
         const text = new TextDecoder().decode(kvMsg.blobData);
@@ -1906,12 +1911,12 @@ export class AgentServiceClient {
       } catch {
         console.log(`[DEBUG] Blob data (${kvMsg.blobData.length} bytes, non-text)`);
       }
-      
+
       // SetBlobResult: empty = no error
       const result = new Uint8Array(0);
       const kvClientMsg = buildKvClientMessage(kvMsg.id, 'set_blob_result', result);
       const responseMsg = buildAgentClientMessageWithKv(kvClientMsg);
-      
+
       await this.bidiAppend(requestId, appendSeqno, responseMsg);
       return appendSeqno + 1n;
     }
@@ -1929,9 +1934,9 @@ export class AgentServiceClient {
     if (!this.currentRequestId) {
       throw new Error("No active chat stream - cannot send tool result");
     }
-    
+
     console.log("[DEBUG] Sending tool result for exec id:", execRequest.id, "result:", result.success ? "success" : "error");
-    
+
     // Build ExecClientMessage with mcp_result
     const execClientMsg = buildExecClientMessage(
       execRequest.id,
@@ -1939,20 +1944,20 @@ export class AgentServiceClient {
       result
     );
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
-    
+
     // Send the result
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Tool result sent, new seqno:", this.currentAppendSeqno);
-    
+
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(execRequest.id);
     const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Stream close sent for exec id:", execRequest.id);
   }
 
@@ -1960,11 +1965,11 @@ export class AgentServiceClient {
    * Send a shell execution result back to the server
    */
   async sendShellResult(
-    id: number, 
-    execId: string | undefined, 
+    id: number,
+    execId: string | undefined,
     command: string,
     cwd: string,
-    stdout: string, 
+    stdout: string,
     stderr: string,
     exitCode: number,
     executionTimeMs?: number
@@ -1972,22 +1977,22 @@ export class AgentServiceClient {
     if (!this.currentRequestId) {
       throw new Error("No active chat stream - cannot send shell result");
     }
-    
+
     console.log("[DEBUG] Sending shell result for id:", id, "exitCode:", exitCode);
-    
+
     const execClientMsg = buildExecClientMessageWithShellResult(id, execId, command, cwd, stdout, stderr, exitCode, executionTimeMs);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
 
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(id);
     const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
@@ -1998,22 +2003,22 @@ export class AgentServiceClient {
     if (!this.currentRequestId) {
       throw new Error("No active chat stream - cannot send ls result");
     }
-    
+
     console.log("[DEBUG] Sending ls result for id:", id);
-    
+
     const execClientMsg = buildExecClientMessageWithLsResult(id, execId, filesString);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
 
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(id);
     const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
@@ -2024,22 +2029,22 @@ export class AgentServiceClient {
     if (!this.currentRequestId) {
       throw new Error("No active chat stream - cannot send request context result");
     }
-    
+
     console.log("[DEBUG] Sending request context result for id:", id);
-    
+
     const execClientMsg = buildExecClientMessageWithRequestContextResult(id, execId);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
 
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(id);
     const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
@@ -2047,8 +2052,8 @@ export class AgentServiceClient {
    * Send a file read result back to the server
    */
   async sendReadResult(
-    id: number, 
-    execId: string | undefined, 
+    id: number,
+    execId: string | undefined,
     content: string,
     path: string,
     totalLines?: number,
@@ -2058,22 +2063,22 @@ export class AgentServiceClient {
     if (!this.currentRequestId) {
       throw new Error("No active chat stream - cannot send read result");
     }
-    
+
     console.log("[DEBUG] Sending read result for id:", id, "path:", path, "contentLength:", content.length);
-    
+
     const execClientMsg = buildExecClientMessageWithReadResult(id, execId, content, path, totalLines, fileSize, truncated);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
 
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(id);
     const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
@@ -2090,22 +2095,22 @@ export class AgentServiceClient {
     if (!this.currentRequestId) {
       throw new Error("No active chat stream - cannot send grep result");
     }
-    
+
     console.log("[DEBUG] Sending grep result for id:", id, "pattern:", pattern, "files:", files.length);
-    
+
     const execClientMsg = buildExecClientMessageWithGrepResult(id, execId, pattern, path, files);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
 
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(id);
     const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
-    
+
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
-    
+
     console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
@@ -2123,14 +2128,14 @@ export class AgentServiceClient {
     const fields = parseProtoFields(data);
     // Log all fields in InteractionUpdate for debugging
     console.log("[DEBUG] InteractionUpdate fields:", fields.map(f => `field${f.fieldNumber}`).join(", "));
-    
+
     let text: string | null = null;
     let isComplete = false;
     let isHeartbeat = false;
     let toolCallStarted: { callId: string; modelCallId: string; toolType: string; name: string; arguments: string } | null = null;
     let toolCallCompleted: { callId: string; modelCallId: string; toolType: string; name: string; arguments: string } | null = null;
     let partialToolCall: { callId: string; argsTextDelta: string } | null = null;
-    
+
     for (const field of fields) {
       // field 1 = text_delta (TextDeltaUpdate)
       if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
@@ -2197,7 +2202,7 @@ export class AgentServiceClient {
         isHeartbeat = true;
       }
     }
-    
+
     return { text, isComplete, isHeartbeat, toolCallStarted, toolCallCompleted, partialToolCall };
   }
 
@@ -2205,8 +2210,12 @@ export class AgentServiceClient {
    * Send a streaming chat request using BidiSse pattern
    */
   async *chatStream(request: AgentChatRequest): AsyncGenerator<AgentStreamChunk> {
+    const startTime = Date.now();
     const requestId = randomUUID();
+
     const messageBody = this.buildChatMessage(request);
+    const buildTime = Date.now() - startTime;
+
     let appendSeqno = 0n;
 
     // Store for tool result submission
@@ -2219,7 +2228,7 @@ export class AgentServiceClient {
 
     // Start the SSE stream
     const sseUrl = `${this.baseUrl}/agent.v1.AgentService/RunSSE`;
-    
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
 
@@ -2233,9 +2242,13 @@ export class AgentServiceClient {
 
       // Send initial message
       await this.bidiAppend(requestId, appendSeqno++, messageBody);
+      const appendTime = Date.now() - startTime;
       this.currentAppendSeqno = appendSeqno;
 
       const sseResponse = await ssePromise;
+      const responseTime = Date.now() - startTime;
+
+      console.log(`[TIMING] Request sent: build=${buildTime}ms, append=${appendTime}ms, response=${responseTime}ms`);
 
       if (!sseResponse.ok) {
         clearTimeout(timeout);
@@ -2253,14 +2266,20 @@ export class AgentServiceClient {
       const reader = sseResponse.body.getReader();
       let buffer = new Uint8Array(0);
       let turnEnded = false;
+      let firstContentLogged = false;
 
       try {
         while (!turnEnded) {
           const { done, value } = await reader.read();
-          
+
           if (done) {
             yield { type: "done" };
             break;
+          }
+
+          if (!firstContentLogged) {
+            console.log(`[TIMING] First chunk received in ${Date.now() - startTime}ms`);
+            firstContentLogged = true;
           }
 
           // Append to buffer
@@ -2277,9 +2296,9 @@ export class AgentServiceClient {
                           (buffer[offset + 2]! << 16) |
                           (buffer[offset + 3]! << 8) |
                           buffer[offset + 4]!;
-            
+
             if (offset + 5 + length > buffer.length) break;
-            
+
             const frameData = buffer.slice(offset + 5, offset + 5 + length);
             offset += 5 + length;
 
@@ -2299,19 +2318,19 @@ export class AgentServiceClient {
             // Parse AgentServerMessage
             const serverMsgFields = parseProtoFields(frameData);
             console.log("[DEBUG] Server message fields:", serverMsgFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
-            
+
             for (const field of serverMsgFields) {
               try {
                 // field 1 = interaction_update
                 if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
                   console.log("[DEBUG] Received interaction_update, length:", field.value.length);
                   const parsed = this.parseInteractionUpdate(field.value);
-                  
+
                   // Yield text content
                   if (parsed.text) {
                     yield { type: "text", content: parsed.text };
                   }
-                  
+
                   // Yield tool call started
                   if (parsed.toolCallStarted) {
                     yield {
@@ -2325,7 +2344,7 @@ export class AgentServiceClient {
                       },
                     };
                   }
-                  
+
                   // Yield tool call completed
                   if (parsed.toolCallCompleted) {
                     yield {
@@ -2339,7 +2358,7 @@ export class AgentServiceClient {
                       },
                     };
                   }
-                  
+
                   // Yield partial tool call updates
                   if (parsed.partialToolCall) {
                     yield {
@@ -2354,17 +2373,17 @@ export class AgentServiceClient {
                       partialArgs: parsed.partialToolCall.argsTextDelta,
                     };
                   }
-                  
+
                   if (parsed.isComplete) {
                     turnEnded = true;
                   }
-                  
+
                   // Yield heartbeat events for the server to track
                   if (parsed.isHeartbeat) {
                     yield { type: "heartbeat" };
                   }
                 }
-                
+
                 // field 3 = conversation_checkpoint_update (completion signal)
                 // NOTE: Checkpoint does NOT mean we're done! exec_server_message can come AFTER checkpoint.
                 // Only end on turn_ended (field 14 in interaction_update) or stream close.
@@ -2386,14 +2405,14 @@ export class AgentServiceClient {
                   yield { type: "checkpoint" };
                   // DO NOT set turnEnded here - exec messages may follow!
                 }
-                
+
                 // field 2 = exec_server_message (tool execution request)
                 if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
                   console.log("[DEBUG] Received exec_server_message (field 2), length:", field.value.length);
-                  
+
                   // Parse the ExecServerMessage
                   const execRequest = parseExecServerMessage(field.value);
-                  
+
                   if (execRequest) {
                     // Log based on type
                     if (execRequest.type === 'mcp') {
@@ -2408,7 +2427,7 @@ export class AgentServiceClient {
                     } else {
                       console.log(`[DEBUG] Parsed ${execRequest.type} exec request:`, execRequest);
                     }
-                    
+
                     // Yield exec_request chunk for the server to handle
                     yield {
                       type: "exec_request",
@@ -2420,7 +2439,7 @@ export class AgentServiceClient {
                     console.log("[DEBUG] exec_server_message fields (unhandled):", execFields.map(f => `field${f.fieldNumber}`).join(", "));
                   }
                 }
-                
+
                 // field 4 = kv_server_message
                 if (field.fieldNumber === 4 && field.wireType === 2 && field.value instanceof Uint8Array) {
                   const kvMsg = parseKvServerMessage(field.value);
@@ -2434,7 +2453,7 @@ export class AgentServiceClient {
               }
             }
           }
-          
+
           buffer = buffer.slice(offset);
         }
 
@@ -2465,7 +2484,7 @@ export class AgentServiceClient {
    */
   async chat(request: AgentChatRequest): Promise<string> {
     let result = "";
-    
+
     for await (const chunk of this.chatStream(request)) {
       if (chunk.type === "error") {
         throw new Error(chunk.error ?? "Unknown error");
@@ -2474,7 +2493,7 @@ export class AgentServiceClient {
         result += chunk.content;
       }
     }
-    
+
     return result;
   }
 }

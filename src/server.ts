@@ -639,16 +639,6 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 };
                 controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
                 
-                // Create a promise that will be resolved when tool result is submitted
-                const resultPromise = new Promise<{ content?: string; error?: string }>((resolve) => {
-                  pendingToolResults.set(openaiToolCallId, { 
-                    execRequest: execReq, 
-                    client,
-                    resolve
-                  });
-                });
-                console.log(`[DEBUG] Registered pending tool result for ${openaiToolCallId}`);
-                
                 // End the OpenAI stream with tool_calls finish reason
                 const toolCallsFinishChunk: OpenAIStreamChunk = {
                   id: completionId,
@@ -664,43 +654,15 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 controller.enqueue(encoder.encode(createSSEChunk(toolCallsFinishChunk)));
                 controller.enqueue(encoder.encode(createSSEDone()));
                 
-                // Close the stream immediately - client can now proceed
+                // Close the OpenAI stream immediately - client (OpenCode) can now proceed
+                // The client will execute the tool and send results in a NEW request with
+                // role: "tool" messages. We don't need to wait here - the new request will
+                // create a fresh conversation with Cursor including the tool results.
                 isClosed = true;
                 controller.close();
                 
-                console.log("[DEBUG] OpenAI stream closed, waiting for tool result via multi-turn...");
-                
-                // Wait for tool result (client will send it in a new request with messages)
-                // For now, we also support /v1/tool_results endpoint for backward compatibility
-                const toolResultData = await resultPromise;
-                console.log("[DEBUG] Tool result received:", toolResultData);
-                
-                // Send tool result to Cursor based on exec type
-                if (execReq.type === 'shell') {
-                  // Parse result as shell output
-                  const content = toolResultData.content ?? "";
-                  await client.sendShellResult(execReq.id, execReq.execId, execReq.command, execReq.cwd || process.cwd(), content, "", 0, 0);
-                } else if (execReq.type === 'read') {
-                  const content = toolResultData.content ?? "";
-                  const lines = content.split('\n').length;
-                  await client.sendReadResult(execReq.id, execReq.execId, content, execReq.path, lines, BigInt(content.length), false);
-                } else if (execReq.type === 'ls') {
-                  await client.sendLsResult(execReq.id, execReq.execId, toolResultData.content ?? "");
-                } else if (execReq.type === 'grep') {
-                  // Parse grep result as file list
-                  const files = (toolResultData.content ?? "").trim().split('\n').filter(f => f.length > 0);
-                  await client.sendGrepResult(execReq.id, execReq.execId, execReq.pattern || '', execReq.path || process.cwd(), files);
-                } else if (execReq.type === 'mcp') {
-                  const mcpReq = execReq as McpExecRequest & { type: 'mcp' };
-                  if (toolResultData.error) {
-                    await client.sendToolResult(mcpReq, { error: toolResultData.error });
-                  } else {
-                    await client.sendToolResult(mcpReq, { success: { content: toolResultData.content ?? "", isError: false } });
-                  }
-                }
-                
-                console.log("[DEBUG] Sent tool result to Cursor");
-                toolExecutionCompleted = true;
+                console.log("[DEBUG] OpenAI stream closed. Client will send tool results in new request.");
+                return; // Exit the stream handler - we're done with this request
                 
               } else if (execReq.type === 'shell') {
                 // Execute shell command locally
@@ -824,11 +786,13 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                   toolExecutionCompleted = true;
                 }
               } else if (execReq.type === 'mcp') {
-                // MCP tool call - convert to OpenAI format and emit
+                // MCP tool call when client didn't provide tools
+                // This is an edge case - most clients (like OpenCode) provide tools
+                // For now, emit as tool_call and close stream
                 hasToolCalls = true;
-                const currentIndex = mcpToolCallIndex++; // Use MCP-specific counter for OpenAI clients
+                const currentIndex = mcpToolCallIndex++;
                 
-                console.log("[DEBUG] MCP tool call:", {
+                console.log("[DEBUG] MCP tool call (no client tools):", {
                   toolName: execReq.toolName,
                   args: execReq.args,
                 });
@@ -860,16 +824,6 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 };
                 controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
                 
-                // Create a promise that will be resolved when tool result is submitted
-                const resultPromise = new Promise<{ content?: string; error?: string }>((resolve) => {
-                  pendingToolResults.set(openaiToolCallId, { 
-                    execRequest: execReq, 
-                    client,
-                    resolve // Store the resolve function
-                  });
-                });
-                console.log(`[DEBUG] Registered pending tool result for ${openaiToolCallId}, waiting for result...`);
-                
                 // End the OpenAI stream with tool_calls finish reason
                 const toolCallsFinishChunk: OpenAIStreamChunk = {
                   id: completionId,
@@ -885,36 +839,12 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 controller.enqueue(encoder.encode(createSSEChunk(toolCallsFinishChunk)));
                 controller.enqueue(encoder.encode(createSSEDone()));
                 
-                // Close the stream immediately - client can now proceed
+                // Close the OpenAI stream - client will send results in new request
                 isClosed = true;
                 controller.close();
                 
-                // Wait for tool result to be submitted via /v1/tool_results
-                // This happens asynchronously - the OpenAI stream is already closed
-                console.log("[DEBUG] OpenAI stream closed, waiting for tool result submission...");
-                const toolResultData = await resultPromise;
-                console.log("[DEBUG] Tool result received:", toolResultData);
-                
-                // Send tool result to Cursor
-                if (toolResultData.error) {
-                  await client.sendToolResult(execReq, {
-                    error: toolResultData.error,
-                  });
-                } else {
-                  await client.sendToolResult(execReq, {
-                    success: {
-                      content: toolResultData.content ?? "",
-                      isError: false,
-                    },
-                  });
-                }
-                console.log("[DEBUG] Sent tool result to Cursor, continuing stream...");
-                toolExecutionCompleted = true;
-                
-                // NOTE: The OpenAI stream is now closed, but the Cursor stream continues.
-                // The continuation text will be lost unless the client makes another request.
-                // For proper OpenAI compatibility, the client should make a new request with
-                // the tool result as a message, but we can't easily support that pattern yet.
+                console.log("[DEBUG] OpenAI stream closed. Client will send MCP tool results in new request.");
+                return;
               }
             } else if (chunk.type === "error") {
               // Send error in stream format
