@@ -1980,6 +1980,15 @@ export class AgentServiceClient {
     
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
+
+    // Send stream close control message
+    const controlMsg = buildExecClientControlMessage(id);
+    const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
+    
+    await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
+    this.currentAppendSeqno++;
+    
+    console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -1997,6 +2006,15 @@ export class AgentServiceClient {
     
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
+
+    // Send stream close control message
+    const controlMsg = buildExecClientControlMessage(id);
+    const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
+    
+    await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
+    this.currentAppendSeqno++;
+    
+    console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2014,6 +2032,15 @@ export class AgentServiceClient {
     
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
+
+    // Send stream close control message
+    const controlMsg = buildExecClientControlMessage(id);
+    const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
+    
+    await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
+    this.currentAppendSeqno++;
+    
+    console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2039,6 +2066,15 @@ export class AgentServiceClient {
     
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
+
+    // Send stream close control message
+    const controlMsg = buildExecClientControlMessage(id);
+    const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
+    
+    await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
+    this.currentAppendSeqno++;
+    
+    console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2062,6 +2098,15 @@ export class AgentServiceClient {
     
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
+
+    // Send stream close control message
+    const controlMsg = buildExecClientControlMessage(id);
+    const controlResponseMsg = buildAgentClientMessageWithExecControl(controlMsg);
+    
+    await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
+    this.currentAppendSeqno++;
+    
+    console.log("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**

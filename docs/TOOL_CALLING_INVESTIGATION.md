@@ -1,9 +1,34 @@
 # Tool Calling Investigation Summary
 
 **Date**: December 8, 2025
-**Status**: ✅ Tool execution working (shell, ls, read, grep/glob) - Model continuation issue pending
+**Status**: ✅ Tool execution working (shell, ls, read, grep/glob) - Heartbeat issue fix applied
 
-## Latest Status (Session 6)
+## Latest Status (Session 7)
+
+### Fixed: Model Continuation After Tool Execution (Heartbeat Loop)
+The issue where the model got stuck in a heartbeat loop after tool execution has been addressed.
+
+**Root Cause**:
+When executing built-in tools (`shell`, `ls`, `read`, `grep`, `request_context`), the client was sending the result (`ExecClientMessage`) but **not** closing the execution stream. The server continued waiting for more data on that execution stream, preventing the model from proceeding to generate text.
+
+**The Fix**:
+Modified `AgentServiceClient` methods (`sendShellResult`, `sendLsResult`, `sendReadResult`, `sendGrepResult`, `sendRequestContextResult`) to send an `ExecClientControlMessage` with `stream_close` immediately after sending the result. This matches the behavior already implemented in `sendToolResult` for MCP tools.
+
+**Code Changes**:
+- Updated `src/lib/api/agent-service.ts` to append a stream close message after every tool execution result.
+
+### Added: MCP Tool Glue to OpenAI Client
+- `server.ts` now translates `exec_request` with `mcp_args` into OpenAI `tool_calls`, registers a pending map, and exposes `POST /v1/tool_results` to accept tool outputs from the caller.
+- Pending entries are keyed by the OpenAI tool_call_id and call `sendToolResult` (with stream_close) when the result arrives.
+
+### Next Steps
+1. ⬜ Verify the fix with actual tool execution (using `scripts/test-exec-flow.ts` or running the server)
+2. ⬜ Implement proper `LsDirectoryTreeNode` format (currently sending simple string)
+3. ⬜ Test MCP tool round-trip (mcp_args → client → mcp_result)
+
+---
+
+## Previous Status (Session 6)
 
 ### Completed: Grep/Glob Tool Support
 Added support for grep and glob file search operations:

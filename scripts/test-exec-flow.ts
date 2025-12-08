@@ -376,7 +376,7 @@ async function main() {
   
   // Build AgentClientMessage for chat with AGENT mode
   const userMessage = concatBytes(
-    encodeStringField(1, "List the files in the current directory using the shell."),  // Request tool execution
+    encodeStringField(1, "Run 'echo hello' using the bash tool."),  // Request tool execution
     encodeStringField(2, messageId),  // message_id
     encodeInt32Field(4, 1)  // mode = AGENT (1)
   );
@@ -631,6 +631,14 @@ async function main() {
                   const agentClientMsg = encodeMessageField(2, execClientMessage);
                   const success = await sendBidiAppend(agentClientMsg);
                   console.log(`>>> LS result sent: ${success ? 'OK' : 'FAILED'}`);
+
+                  // Send stream close
+                  console.log('>>> Sending stream close...');
+                  const streamClose = encodeUint32Field(1, execRequest.id);
+                  const controlMsg = encodeMessageField(1, streamClose);
+                  const controlAgentMsg = encodeMessageField(5, controlMsg); // field 5 = exec_client_control_message
+                  await sendBidiAppend(controlAgentMsg);
+                  console.log('>>> Stream close sent');
                 } else {
                   console.log('Full exec message:');
                   printProtoFields(field.value, "  ");

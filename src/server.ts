@@ -62,6 +62,13 @@ interface OpenAIChatRequest {
   tool_choice?: "auto" | "none" | { type: "function"; function: { name: string } };
 }
 
+interface ToolResultRequestBody {
+  tool_call_id: string;
+  content?: string;
+  is_error?: boolean;
+  error?: string;
+}
+
 interface OpenAIChatChoice {
   index: number;
   message: {
@@ -140,6 +147,14 @@ interface CursorModelDetails {
 let cachedModels: CursorModelDetails[] | null = null;
 let modelsCacheTime = 0;
 const MODEL_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Pending tool results keyed by OpenAI tool_call_id
+interface PendingToolResult {
+  execRequest: ExecRequest & { type: "mcp" };
+  client: ReturnType<typeof createAgentServiceClient>;
+  resolve?: (result: { content?: string; error?: string }) => void;
+}
+const pendingToolResults = new Map<string, PendingToolResult>();
 
 // --- Proto Parsing Helpers ---
 
@@ -647,7 +662,7 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 // Generate OpenAI-style tool call ID
                 const openaiToolCallId = `call_${execReq.toolCallId.replace(/-/g, "").slice(0, 24) || execReq.id}`;
                 
-                // Send tool call start
+                // Send tool call chunk to OpenAI client
                 const toolCallChunk: OpenAIStreamChunk = {
                   id: completionId,
                   object: "chat.completion.chunk",
@@ -671,18 +686,56 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
                 };
                 controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
                 
-                // Send a placeholder result back to Cursor
-                try {
+                // Create a promise that will be resolved when tool result is submitted
+                const resultPromise = new Promise<{ content?: string; error?: string }>((resolve) => {
+                  pendingToolResults.set(openaiToolCallId, { 
+                    execRequest: execReq, 
+                    client,
+                    resolve // Store the resolve function
+                  });
+                });
+                console.log(`[DEBUG] Registered pending tool result for ${openaiToolCallId}, waiting for result...`);
+                
+                // End the OpenAI stream with tool_calls finish reason
+                const toolCallsFinishChunk: OpenAIStreamChunk = {
+                  id: completionId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: body.model ?? "gpt-4o",
+                  choices: [{
+                    index: 0,
+                    delta: {},
+                    finish_reason: "tool_calls",
+                  }],
+                };
+                controller.enqueue(encoder.encode(createSSEChunk(toolCallsFinishChunk)));
+                controller.enqueue(encoder.encode(createSSEDone()));
+                
+                // Wait for tool result to be submitted via /v1/tool_results
+                console.log("[DEBUG] Waiting for tool result submission...");
+                const toolResultData = await resultPromise;
+                console.log("[DEBUG] Tool result received:", toolResultData);
+                
+                // Send tool result to Cursor
+                if (toolResultData.error) {
+                  await client.sendToolResult(execReq, {
+                    error: toolResultData.error,
+                  });
+                } else {
                   await client.sendToolResult(execReq, {
                     success: {
-                      content: `Tool "${execReq.toolName}" execution request forwarded to OpenAI client. Tool call ID: ${openaiToolCallId}`,
+                      content: toolResultData.content ?? "",
                       isError: false,
                     },
                   });
-                  console.log("[DEBUG] Sent placeholder tool result for:", execReq.toolName);
-                } catch (err: any) {
-                  console.error("[ERROR] Failed to send tool result:", err.message);
                 }
+                console.log("[DEBUG] Sent tool result to Cursor, continuing stream...");
+                toolExecutionCompleted = true;
+                
+                // NOTE: The OpenAI stream is now closed, but the Cursor stream continues.
+                // The continuation text will be lost unless the client makes another request.
+                // For proper OpenAI compatibility, the client should make a new request with
+                // the tool result as a message, but we can't easily support that pattern yet.
               }
             } else if (chunk.type === "error") {
               // Send error in stream format
@@ -822,6 +875,69 @@ async function handleModels(accessToken: string): Promise<Response> {
   }
 }
 
+async function handleToolResult(req: Request): Promise<Response> {
+  let body: ToolResultRequestBody;
+  try {
+    body = await req.json() as ToolResultRequestBody;
+  } catch {
+    return createErrorResponse("Invalid JSON body", "invalid_request", 400);
+  }
+
+  if (!body.tool_call_id || typeof body.tool_call_id !== "string") {
+    return createErrorResponse("tool_call_id is required", "invalid_request", 400);
+  }
+
+  const pending = pendingToolResults.get(body.tool_call_id);
+  if (!pending) {
+    return createErrorResponse("tool_call_id not pending or already resolved", "invalid_request", 404);
+  }
+
+  // Remove from pending to avoid duplicate sends
+  pendingToolResults.delete(body.tool_call_id);
+
+  // If there's a resolve function, use it (new streaming approach)
+  if (pending.resolve) {
+    if (body.is_error || body.error) {
+      pending.resolve({ error: body.error ?? body.content ?? "Tool returned an error" });
+    } else {
+      pending.resolve({ content: body.content ?? "" });
+    }
+    
+    return new Response(JSON.stringify({ status: "ok" }), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  // Fallback: directly send result to Cursor (old approach)
+  const { execRequest, client } = pending;
+  try {
+    if (body.is_error || body.error) {
+      await client.sendToolResult(execRequest, {
+        error: body.error ?? body.content ?? "Tool returned an error",
+      });
+    } else {
+      await client.sendToolResult(execRequest, {
+        success: {
+          content: body.content ?? "",
+          isError: body.is_error ?? false,
+        },
+      });
+    }
+
+    return new Response(JSON.stringify({ status: "ok" }), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch (err: any) {
+    return createErrorResponse(err.message ?? "Failed to send tool result", "server_error", 500);
+  }
+}
+
 function handleCORS(): Response {
   return new Response(null, {
     status: 204,
@@ -870,6 +986,10 @@ const server = Bun.serve({
     if (url.pathname === "/v1/models" && method === "GET") {
       return handleModels(accessToken);
     }
+
+    if (url.pathname === "/v1/tool_results" && method === "POST") {
+      return handleToolResult(req);
+    }
     
     // Health check
     if (url.pathname === "/health" || url.pathname === "/") {
@@ -894,12 +1014,13 @@ console.log(`
 ║                                                            ║
 ║  Endpoints:                                                ║
 ║    POST /v1/chat/completions  - Chat completions           ║
+║    POST /v1/tool_results     - Submit tool results         ║
 ║    GET  /v1/models            - List available models      ║
 ║    GET  /health               - Health check               ║
 ║                                                            ║
 ║  Usage with curl:                                          ║
-║    curl http://localhost:${PORT}/v1/chat/completions \\${" ".repeat(Math.max(0, 6 - PORT.toString().length))}║
-║      -H "Content-Type: application/json" \\                 ║
+║    curl http://localhost:${PORT}/v1/chat/completions \${" ".repeat(Math.max(0, 6 - PORT.toString().length))}║
+║      -H "Content-Type: application/json" \                 ║
 ║      -d '{"model":"gpt-4o","messages":[...]}'              ║
 ║                                                            ║
 ║  Usage with OpenAI SDK:                                    ║
@@ -907,5 +1028,6 @@ console.log(`
 ║      baseURL: "http://localhost:${PORT}/v1",${" ".repeat(Math.max(0, 20 - PORT.toString().length))}║
 ║      apiKey: "not-needed"                                  ║
 ║    });                                                     ║
+
 ╚════════════════════════════════════════════════════════════╝
 `);
