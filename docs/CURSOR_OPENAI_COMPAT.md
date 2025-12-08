@@ -114,15 +114,48 @@ Assistant: <continuation after tool>
 
 ## Session Reuse Strategy (planned)
 
+**Cursor flow vs OpenAI flow (why change is needed):**
+- **Cursor native:** One long-lived, bidirectional stream per conversation. Tool calls are `exec_request`s on that same stream; Cursor pauses and waits for tool results via `bidiAppend`, then continues without re-bootstrap. Multiple tools → one stream, one bootstrap.
+- **OpenAI pattern:** Each turn is a new HTTP request. Tool calls are emitted, the stream ends, the client executes tools locally, then sends a *new* request with `role:"tool"` messages. The server is expected to continue from that context.
+- **Current gap:** Our proxy creates a fresh Cursor stream for every OpenAI turn. That means paying Cursor’s bootstrap (~6s) repeatedly, losing the persistent-stream benefit that Cursor’s design provides. Multi-tool flows become multiples of the bootstrap cost.
+
 **Problem:** Cursor’s Agent API keeps a single persistent stream per conversation. Our OpenAI translation currently starts a *new* Cursor session for every turn, paying ~6s bootstrap each time and losing the benefit of Cursor’s stream reuse.
 
 **Goal:** Reuse the same Cursor session across turns (and across tool calls) while still presenting the OpenAI multi-turn pattern. Support multiple parallel OpenCode windows by isolating sessions.
 
-**Plan:**
-- **Session ID:** Generate a unique sessionId per incoming OpenAI conversation (e.g., per first request). Encode it into each emitted `tool_call_id` (`call_<sessionId>_<cursorCallId>`).
-- **Session store:** Keep `{ client, requestId, appendSeqno }` per sessionId. One Cursor stream per OpenCode window.
-- **Tool results routing:** When a follow-up request has `role: "tool"` messages, extract `tool_call_id`, recover `sessionId`, and route the tool result via the existing Cursor stream (`bidiAppend`) instead of starting a new session.
-- **Continuation:** After sending tool results to Cursor, continue reading from the existing stream and forward the assistant’s continuation to the OpenAI client.
-- **Cleanup:** Idle timeout and explicit completion tear down the session. If a sessionId is unknown, fall back to starting a fresh session.
+### Lifecycle (intended)
+1) **First OpenAI request** (user → tools allowed)
+   - Create `sessionId` (per OpenCode window/conversation).
+   - Start Cursor `chatStream`; store `{ client, requestId, iterator, appendSeqno, model, lastActivity }` in a session map keyed by `sessionId`.
+   - When Cursor emits `exec_request`, emit OpenAI `tool_calls` with `tool_call_id` = `sess_<sessionId>__call_<cursorCallId>`; **do not close** the Cursor stream—park it.
+   - Close the OpenAI SSE to let the client execute the tool.
 
-**Multi-window safety:** Each OpenCode window keeps its own sessionId (embedded in its tool_call_ids), so sessions are isolated and can run in parallel without collision.
+2) **Follow-up OpenAI request** (client sends `role:"tool"` result)
+   - Parse `tool_call_id`, recover `sessionId`; look up session.
+   - Send tool result back to Cursor via the stored `client`/`appendSeqno` (`bidiAppend`).
+   - Resume reading the parked Cursor iterator; stream the assistant continuation to the OpenAI client.
+
+3) **Repeat** for additional tool calls within the same session (no new bootstrap).
+
+4) **Completion / teardown**
+   - On model finish or idle timeout, close Cursor stream and delete the session entry.
+   - If a `tool_call_id` is unknown or the session expired, start a fresh session (graceful fallback).
+
+### Data shapes / keys
+- **sessionId**: short token (e.g., 12 chars) generated on first turn.
+- **tool_call_id**: `sess_<sessionId>__call_<cursorCallId>` so we can recover the session from the tool result message.
+- **Session store entry**: `{ client, requestId, iterator, appendSeqno, model, createdAt, lastActivity, pendingExecs? }`.
+
+### Multi-window safety
+- Each OpenCode window gets its own `sessionId` embedded in its `tool_call_id`s, so sessions don’t collide. Parallel windows → parallel Cursor streams.
+
+### Edge cases & fallbacks
+- Missing/unknown `sessionId`: start a new session and continue (bootstrap cost is paid once).
+- Session expired: same as above; fail-soft to a fresh session.
+- Model errors: surface to the client, then tear down the session.
+- Idle timeout: default 15m planned; configurable.
+
+### Testing ideas (automatic harness)
+- Simulate multi-turn with a fake client: first request emits tool_call, second sends tool result, ensure the same session is used (no new bootstrap) and continuation arrives.
+- Parallel sessions: two distinct `sessionId`s, interleave tool results, ensure no cross-talk.
+- Expired session fallback: delete session mid-test, verify fresh session is created and request still succeeds (with an extra bootstrap).
