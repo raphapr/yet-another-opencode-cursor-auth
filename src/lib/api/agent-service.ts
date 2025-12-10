@@ -2065,6 +2065,61 @@ export class AgentServiceClient {
   }
 
   /**
+   * Analyze blob data to determine its type and extract content
+   */
+  private analyzeBlobData(data: Uint8Array): {
+    type: 'json' | 'text' | 'protobuf' | 'binary';
+    json?: any;
+    text?: string;
+    protoFields?: Array<{ num: number; wire: number; size: number; text?: string }>;
+  } {
+    // Try UTF-8 text first
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+      
+      // Try JSON
+      try {
+        const json = JSON.parse(text);
+        return { type: 'json', json, text };
+      } catch {
+        // Not JSON, return as text
+        return { type: 'text', text };
+      }
+    } catch {
+      // Not valid UTF-8
+    }
+
+    // Try protobuf parsing
+    try {
+      const fields = parseProtoFields(data);
+      if (fields.length > 0 && fields.length < 100) { // Reasonable field count
+        const protoFields: Array<{ num: number; wire: number; size: number; text?: string }> = [];
+        for (const f of fields) {
+          const entry: { num: number; wire: number; size: number; text?: string } = {
+            num: f.fieldNumber,
+            wire: f.wireType,
+            size: f.value instanceof Uint8Array ? f.value.length : 0,
+          };
+          // Try to decode field value as text
+          if (f.wireType === 2 && f.value instanceof Uint8Array) {
+            try {
+              entry.text = new TextDecoder('utf-8', { fatal: true }).decode(f.value);
+            } catch {
+              // Binary field
+            }
+          }
+          protoFields.push(entry);
+        }
+        return { type: 'protobuf', protoFields };
+      }
+    } catch {
+      // Not valid protobuf
+    }
+
+    return { type: 'binary' };
+  }
+
+  /**
    * Handle KV server message and send response
    * Also tracks assistant response blobs for session reuse
    */
@@ -2088,29 +2143,90 @@ export class AgentServiceClient {
       const key = this.blobIdToKey(kvMsg.blobId);
       this.blobStore.set(key, kvMsg.blobData);
 
-      // Debug: try to decode blob data as text to see what it contains
-      // Also check for assistant response blobs that we need to extract for session reuse
-      try {
-        const text = new TextDecoder().decode(kvMsg.blobData);
-        if (text.length < 500) {
-          console.log(`[DEBUG] Blob data (text): ${text.slice(0, 200)}`);
-        } else {
-          console.log(`[DEBUG] Blob data (${kvMsg.blobData.length} bytes, first 200 chars): ${text.slice(0, 200)}`);
+      // Enhanced debug: analyze blob data thoroughly to find assistant responses
+      // Cursor may store responses in various formats (JSON, protobuf, text)
+      const blobAnalysis = this.analyzeBlobData(kvMsg.blobData);
+      console.log(`[KV-BLOB] SET id=${kvMsg.id}, key=${key.slice(0, 16)}..., size=${kvMsg.blobData.length}b, type=${blobAnalysis.type}`);
+      
+      if (blobAnalysis.type === 'json') {
+        console.log(`[KV-BLOB]   JSON keys: ${Object.keys(blobAnalysis.json || {}).join(', ')}`);
+        // Log the role field if present
+        if (blobAnalysis.json?.role) {
+          console.log(`[KV-BLOB]   role="${blobAnalysis.json.role}"`);
         }
-        
-        // Check if this is an assistant response blob
-        // Cursor stores model responses as JSON with role: "assistant"
-        try {
-          const json = JSON.parse(text);
-          if (json && json.role === "assistant" && typeof json.content === "string") {
-            console.log(`[DEBUG] Detected assistant response blob (${json.content.length} chars): ${json.content.slice(0, 100)}...`);
-            this.pendingAssistantBlobs.push({ blobId: key, content: json.content });
+        // Check for assistant response patterns
+        if (blobAnalysis.json?.role === "assistant") {
+          const content = blobAnalysis.json.content;
+          console.log(`[KV-BLOB]   content type: ${typeof content}, value: ${JSON.stringify(content)?.slice(0, 200)}`);
+          if (typeof content === "string" && content.length > 0) {
+            console.log(`[KV-BLOB]   ✓ Assistant response found! (${content.length} chars)`);
+            console.log(`[KV-BLOB]   Preview: ${content.slice(0, 150)}...`);
+            this.pendingAssistantBlobs.push({ blobId: key, content });
+          } else if (Array.isArray(content)) {
+            // Content might be an array of content parts (like in OpenAI's format)
+            console.log(`[KV-BLOB]   ✓ Assistant content is array with ${content.length} parts`);
+            for (const part of content) {
+              if (typeof part === 'string') {
+                this.pendingAssistantBlobs.push({ blobId: key, content: part });
+              } else if (part?.type === 'text' && typeof part?.text === 'string') {
+                console.log(`[KV-BLOB]   ✓ Text part: ${part.text.slice(0, 100)}...`);
+                this.pendingAssistantBlobs.push({ blobId: key, content: part.text });
+              }
+            }
+          } else if (content === null || content === undefined) {
+            // Content might be null for tool-calling responses
+            console.log(`[KV-BLOB]   Assistant content is null/undefined (likely tool-calling response)`);
           }
-        } catch {
-          // Not JSON or doesn't have expected structure - that's fine
         }
-      } catch {
-        console.log(`[DEBUG] Blob data (${kvMsg.blobData.length} bytes, non-text)`);
+        // Check for tool_calls in assistant messages
+        if (blobAnalysis.json?.role === "assistant" && Array.isArray(blobAnalysis.json.tool_calls)) {
+          console.log(`[KV-BLOB]   Assistant has tool_calls: ${blobAnalysis.json.tool_calls.length}`);
+        }
+        // Check for "user" role with tool result
+        if (blobAnalysis.json?.role === "user" && blobAnalysis.json?.content) {
+          console.log(`[KV-BLOB]   User message content (${String(blobAnalysis.json.content).length} chars): ${String(blobAnalysis.json.content).slice(0, 100)}...`);
+        }
+        // Check for "tool" role
+        if (blobAnalysis.json?.role === "tool") {
+          console.log(`[KV-BLOB]   Tool result for: ${blobAnalysis.json.tool_call_id}`);
+        }
+        // Also check for messages array pattern
+        if (Array.isArray(blobAnalysis.json?.messages)) {
+          for (const msg of blobAnalysis.json.messages) {
+            if (msg?.role === "assistant" && typeof msg?.content === "string") {
+              console.log(`[KV-BLOB]   ✓ Assistant in messages array! (${msg.content.length} chars)`);
+              console.log(`[KV-BLOB]   Preview: ${msg.content.slice(0, 150)}...`);
+              this.pendingAssistantBlobs.push({ blobId: key, content: msg.content });
+            }
+          }
+        }
+        // Check for content field directly (some formats)
+        if (typeof blobAnalysis.json?.content === "string" && !blobAnalysis.json?.role) {
+          console.log(`[KV-BLOB]   Content field found (${blobAnalysis.json.content.length} chars)`);
+          console.log(`[KV-BLOB]   Preview: ${blobAnalysis.json.content.slice(0, 150)}...`);
+        }
+      } else if (blobAnalysis.type === 'text') {
+        console.log(`[KV-BLOB]   Text preview: ${blobAnalysis.text?.slice(0, 200)}...`);
+        // Check if text looks like a model response (starts with text, not JSON/protobuf markers)
+        if (blobAnalysis.text && !blobAnalysis.text.startsWith('{') && !blobAnalysis.text.startsWith('[') && blobAnalysis.text.length > 50) {
+          console.log(`[KV-BLOB]   Possible plain text response - check manually`);
+        }
+      } else if (blobAnalysis.type === 'protobuf') {
+        console.log(`[KV-BLOB]   Protobuf fields: ${blobAnalysis.protoFields?.map(f => `f${f.num}:w${f.wire}(${f.size}b)`).join(', ')}`);
+        // Try to find text content within protobuf fields
+        for (const field of blobAnalysis.protoFields || []) {
+          if (field.text && field.text.length > 50) {
+            console.log(`[KV-BLOB]   field${field.num} text: ${field.text.slice(0, 100)}...`);
+            // Check if this might be assistant content
+            if (!field.text.startsWith('{') && !field.text.startsWith('[')) {
+              console.log(`[KV-BLOB]   ✓ Possible assistant text in protobuf field ${field.num}`);
+              // Store it for potential use
+              this.pendingAssistantBlobs.push({ blobId: `${key}:f${field.num}`, content: field.text });
+            }
+          }
+        }
+      } else {
+        console.log(`[KV-BLOB]   Binary data (hex start): ${Buffer.from(kvMsg.blobData.slice(0, 32)).toString('hex')}`);
       }
 
       // SetBlobResult: empty = no error

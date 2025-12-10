@@ -87,6 +87,105 @@ Both requests include `tools`. The model decides whether to call more tools or r
 - Session reuse after tool results (would require handling KV-stored text or matching Cursor CLI streaming headers/behavior).
 - Optional: richer `LsResult` tree format instead of `files_string`.
 
+## KV Blob Investigation (December 10, 2025)
+
+### Background
+After sending tool results via BidiAppend, Cursor streams only heartbeats and stores model responses in KV blobs instead of streaming `text_delta`/`token_delta`. This investigation analyzed the blob contents to understand what's being stored.
+
+### Test Setup
+```bash
+# Start server with session reuse enabled and enhanced blob logging
+CURSOR_SESSION_REUSE=1 bun run src/server.ts > server.log 2>&1
+
+# Run investigation script
+bun run scripts/investigate-kv-blobs.ts
+```
+
+### Blob Types Observed
+
+| Blob ID | Size | Type | Role | Content |
+|---------|------|------|------|---------|
+| #0 | 122b | text | - | Empty/metadata |
+| #1 | 8806b | json | `system` | System prompt |
+| #2 | 242b | json | `user` | User message |
+| #3 | 241b | json | `user` | Additional context (user_info) |
+| #4 | 36b | protobuf | - | Unknown metadata |
+| #5 | 465b | json | `assistant` | **Tool call request (NOT text!)** |
+| #6 | 905b | json | `tool` | Tool result storage |
+| #7 | 305b | protobuf | - | Checkpoint data |
+| #8 | 70b | protobuf | - | Unknown metadata |
+
+### Key Finding: Assistant Blob Structure
+
+The assistant blob (#5) contains:
+```json
+{
+  "id": "...",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "tool-call",
+      "toolCallId": "call_...",
+      "toolName": "Shell",
+      "args": {"command": "echo 'Hello from KV blob investigation'"}
+    }
+  ]
+}
+```
+
+**Critical insight**: The `content` field is an **array of tool-call objects**, not a text string!
+
+This means after BidiAppend with tool result:
+1. Cursor acknowledges tool completion (`tool_call_completed`)
+2. The model's response is stored in KV blob
+3. But the model is **requesting the same tool again** (infinite loop!)
+4. No text response is generated
+
+### Why This Happens
+
+When resuming via BidiAppend, Cursor:
+1. Reconstructs conversation from KV blobs (system, user, assistant, tool)
+2. Continues the model turn
+3. Model sees tool result but decides to call tool again (no turn boundary)
+4. Response goes to KV blob instead of streaming
+
+The streaming path (`text_delta`/`token_delta`) is never triggered because:
+- Model outputs tool calls → stored as blob
+- Model outputs text → also stored as blob (never observed)
+
+### Detection Code Added
+
+Enhanced `agent-service.ts` with comprehensive blob analysis:
+```typescript
+private analyzeBlobData(data: Uint8Array): {
+  type: 'json' | 'text' | 'protobuf' | 'binary';
+  json?: any;
+  text?: string;
+  protoFields?: Array<{...}>;
+}
+```
+
+Logging shows blob role, content type, and extracts potential assistant responses.
+
+### Conclusion
+
+**Session reuse via BidiAppend is fundamentally incompatible with text streaming** when tools are involved:
+
+1. ❌ Tool results sent → Model requests tool again (stored in blob)
+2. ❌ Even if model responds with text → Stored in blob, not streamed
+3. ❌ `turn_ended` never fires → Client waits forever
+
+**Recommendation**: Continue using fresh sessions for every request. The overhead is acceptable and streaming works correctly.
+
+### Future Exploration
+
+If session reuse is still desired:
+1. **Poll for blobs**: After heartbeat timeout, check blob store for assistant content
+2. **Extract text from blobs**: Parse assistant blobs and emit as synthetic text chunks
+3. **Force turn end**: Send a signal to close the turn after tool completion
+
+None of these are implemented as fresh sessions work reliably.
+
 ## Reference
 - Key files: `src/server.ts`, `src/plugin/plugin.ts`, `src/lib/api/agent-service.ts`
 - Runtime: Bun, port 18741, Cursor API `api2.cursor.sh` / `agentn.api5.cursor.sh`.
