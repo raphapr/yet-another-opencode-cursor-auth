@@ -1917,7 +1917,7 @@ export interface ToolCallInfo {
 }
 
 export interface AgentStreamChunk {
-  type: "text" | "thinking" | "token" | "checkpoint" | "done" | "error" | "tool_call_started" | "tool_call_completed" | "partial_tool_call" | "exec_request" | "heartbeat" | "exec_server_abort" | "interaction_query";
+  type: "text" | "thinking" | "token" | "checkpoint" | "done" | "error" | "tool_call_started" | "tool_call_completed" | "partial_tool_call" | "exec_request" | "heartbeat" | "exec_server_abort" | "interaction_query" | "kv_blob_assistant";
   content?: string;
   error?: string;
   toolCall?: ToolCallInfo;
@@ -1925,6 +1925,7 @@ export interface AgentStreamChunk {
   execRequest?: ExecRequest;  // For exec_request chunks - tool execution needed
   queryId?: number;       // For interaction_query - the query ID to respond with
   queryType?: string;     // For interaction_query - web_search, ask_question, switch_mode, etc.
+  blobContent?: string;   // For kv_blob_assistant - extracted assistant content from KV blob
 }
 
 // --- Agent Service Client ---
@@ -1952,6 +1953,10 @@ export class AgentServiceClient {
   // For tool result submission during streaming
   private currentRequestId: string | null = null;
   private currentAppendSeqno: bigint = 0n;
+  
+  // For session reuse - track assistant responses stored in KV blobs
+  // When Cursor stores model responses in blobs instead of streaming, we need to extract them
+  private pendingAssistantBlobs: Array<{ blobId: string; content: string }> = [];
 
   constructor(accessToken: string, options: AgentServiceOptions = {}) {
     this.accessToken = accessToken;
@@ -2061,6 +2066,7 @@ export class AgentServiceClient {
 
   /**
    * Handle KV server message and send response
+   * Also tracks assistant response blobs for session reuse
    */
   private async handleKvMessage(
     kvMsg: KvServerMessage,
@@ -2083,12 +2089,25 @@ export class AgentServiceClient {
       this.blobStore.set(key, kvMsg.blobData);
 
       // Debug: try to decode blob data as text to see what it contains
+      // Also check for assistant response blobs that we need to extract for session reuse
       try {
         const text = new TextDecoder().decode(kvMsg.blobData);
         if (text.length < 500) {
           console.log(`[DEBUG] Blob data (text): ${text.slice(0, 200)}`);
         } else {
           console.log(`[DEBUG] Blob data (${kvMsg.blobData.length} bytes, first 200 chars): ${text.slice(0, 200)}`);
+        }
+        
+        // Check if this is an assistant response blob
+        // Cursor stores model responses as JSON with role: "assistant"
+        try {
+          const json = JSON.parse(text);
+          if (json && json.role === "assistant" && typeof json.content === "string") {
+            console.log(`[DEBUG] Detected assistant response blob (${json.content.length} chars): ${json.content.slice(0, 100)}...`);
+            this.pendingAssistantBlobs.push({ blobId: key, content: json.content });
+          }
+        } catch {
+          // Not JSON or doesn't have expected structure - that's fine
         }
       } catch {
         console.log(`[DEBUG] Blob data (${kvMsg.blobData.length} bytes, non-text)`);
@@ -2495,6 +2514,10 @@ export class AgentServiceClient {
       let buffer = new Uint8Array(0);
       let turnEnded = false;
       let firstContentLogged = false;
+      let hasStreamedText = false; // Track if we received any text via streaming
+      
+      // Clear any pending assistant blobs from previous requests
+      this.pendingAssistantBlobs = [];
 
       try {
         while (!turnEnded) {
@@ -2557,6 +2580,7 @@ export class AgentServiceClient {
                   // Yield text content
                   if (parsed.text) {
                     yield { type: "text", content: parsed.text };
+                    hasStreamedText = true;
                     markProgress();
                   }
 
@@ -2773,9 +2797,19 @@ export class AgentServiceClient {
           buffer = buffer.slice(offset);
         }
 
-        // Clean exit
+        // Clean exit - check for KV blob assistant responses if no text was streamed
         if (turnEnded) {
           controller.abort(); // Clean up the connection
+          
+          // Session reuse: If no text was streamed but we have pending assistant blobs,
+          // emit them as kv_blob_assistant chunks so the server can use the content
+          if (!hasStreamedText && this.pendingAssistantBlobs.length > 0) {
+            console.log(`[DEBUG] No streamed text but found ${this.pendingAssistantBlobs.length} assistant blob(s) - emitting`);
+            for (const blob of this.pendingAssistantBlobs) {
+              yield { type: "kv_blob_assistant", blobContent: blob.content };
+            }
+          }
+          
           yield { type: "done" };
         }
       } finally {

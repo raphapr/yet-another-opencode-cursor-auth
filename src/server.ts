@@ -527,6 +527,9 @@ function streamCursorSession(
       };
       controller.enqueue(encoder.encode(createSSEChunk(initialChunk)));
 
+      // Track file-modifying tool calls to handle internal reads
+      let pendingEditToolCall: string | null = null;
+
       try {
         let carryChunk: AgentStreamChunk | null = null;
         while (true) {
@@ -577,7 +580,69 @@ function streamCursorSession(
               ],
             };
             controller.enqueue(encoder.encode(createSSEChunk(streamChunk)));
+          } else if (chunk.type === "kv_blob_assistant" && chunk.blobContent) {
+            // Session reuse: Assistant response was stored in KV blob instead of streaming
+            // Emit the blob content as text to the OpenAI client
+            console.log(`[Session ${session.id}] Emitting KV blob assistant content (${chunk.blobContent.length} chars)`);
+            const streamChunk: OpenAIStreamChunk = {
+              id: completionId,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: chunk.blobContent },
+                  finish_reason: null,
+                },
+              ],
+            };
+            controller.enqueue(encoder.encode(createSSEChunk(streamChunk)));
+          } else if (chunk.type === "tool_call_started" && chunk.toolCall) {
+            // Track file-modifying tool calls (edit, apply_diff) - they require internal read first
+            if (chunk.toolCall.name === "edit" || chunk.toolCall.name === "apply_diff") {
+              pendingEditToolCall = chunk.toolCall.callId;
+              console.log(`[Session ${session.id}] File-modifying tool started (${chunk.toolCall.name}), will handle internal read locally`);
+            }
+            // Don't emit tool_call_started to client - we wait for exec_request
+          } else if (chunk.type === "tool_call_completed" && chunk.toolCall) {
+            // Clear pending edit when completed
+            if (pendingEditToolCall === chunk.toolCall.callId) {
+              pendingEditToolCall = null;
+            }
           } else if (chunk.type === "exec_request" && chunk.execRequest) {
+            // Handle internal reads for edit flows
+            if (chunk.execRequest.type === "read" && pendingEditToolCall) {
+              console.log(`[Session ${session.id}] Handling internal read for edit flow locally`);
+              try {
+                const file = Bun.file(chunk.execRequest.path);
+                const content = await file.text();
+                const stats = await file.stat();
+                const totalLines = content.split("\n").length;
+                await session.client.sendReadResult(
+                  chunk.execRequest.id,
+                  chunk.execRequest.execId,
+                  content,
+                  chunk.execRequest.path,
+                  totalLines,
+                  BigInt(stats.size),
+                  false
+                );
+                console.log(`[Session ${session.id}] Internal read completed, sent result to Cursor`);
+              } catch (err: any) {
+                await session.client.sendReadResult(
+                  chunk.execRequest.id,
+                  chunk.execRequest.execId,
+                  `Error: ${err.message}`,
+                  chunk.execRequest.path,
+                  0,
+                  0n,
+                  false
+                );
+              }
+              continue; // Don't emit this read to client
+            }
+
             // Convert exec_request(s) into OpenAI tool_calls and park the Cursor stream.
             const toolCalls: {
               openaiToolCallId: string;
@@ -1313,7 +1378,7 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   const stream = body.stream ?? false;
   const clientProvidedTools = Array.isArray(body.tools) && body.tools.length > 0;
 
-  // NOTE: We intentionally DON'T use session reuse for tool-calling flows.
+  // NOTE: We intentionally DON'T use session reuse for tool-calling flows BY DEFAULT.
   // 
   // When tool results are sent via BidiAppend to an existing Cursor stream,
   // the model stores its response in KV blobs instead of streaming it back.
@@ -1325,6 +1390,8 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   //
   // See docs/TOOL_CALLING_INVESTIGATION.md "Session 9" for full details.
   // Option B (extract text from KV blobs) is documented there for future reference.
+  //
+  // Set CURSOR_SESSION_REUSE=1 to enable experimental session reuse with KV blob extraction.
 
   const prompt = messagesToPrompt(body.messages);
   const completionId = generateId();
@@ -1341,6 +1408,10 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   console.log(`[DEBUG] Prompt (last 500 chars):`, prompt.slice(-500));
 
   if (stream) {
+    // Use session reuse when enabled via env flag
+    if (SESSION_REUSE_ENABLED) {
+      return streamWithSessionReuse(body, model, accessToken);
+    }
     return legacyStreamResponse({ body, model, prompt, completionId, created, accessToken });
   }
 
@@ -1499,7 +1570,15 @@ function handleCORS(): Response {
 
 const PORT = parseInt(process.env.PORT ?? "18741", 10);
 
+// Session reuse flag - experimental feature that keeps Cursor streams open
+// When enabled, tool results are sent via BidiAppend instead of creating fresh sessions
+// This requires KV blob extraction to work properly
+const SESSION_REUSE_ENABLED = process.env.CURSOR_SESSION_REUSE === "1";
+
 console.log("Starting OpenAI-compatible API server...");
+if (SESSION_REUSE_ENABLED) {
+  console.log("[SESSION_REUSE] Experimental session reuse is ENABLED");
+}
 
 let accessToken: string;
 try {
