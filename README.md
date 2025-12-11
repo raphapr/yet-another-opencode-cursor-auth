@@ -11,17 +11,58 @@
 >
 > If it stops working, feel free to open an issue, but fixes depend on community contributions and reverse-engineering efforts.
 
-An OpenAI-compatible proxy server that routes requests through Cursor's AI backend, enabling any OpenAI-compatible client (including OpenCode) to use Cursor's API with full tool calling support.
+An OpenCode plugin and OpenAI-compatible proxy server that routes requests through Cursor's AI backend, enabling OpenCode (and any OpenAI-compatible client) to use Cursor's API with full tool calling support.
 
 ## Features
 
+- **OpenCode Plugin**: Native integration with OpenCode via OAuth authentication
 - **OpenAI API Compatible**: Drop-in replacement for OpenAI API endpoints
 - **Full Tool Calling Support**: Complete support for function calling with bash, read, write, list, glob/grep
-- **Model Access**: Access to all Cursor models (Claude, GPT-4, Gemini, etc.)
+- **Dynamic Model Discovery**: Automatically fetches available models from Cursor's API
 - **Streaming Support**: Real-time streaming responses via SSE
-- **Authentication Plugin**: Reusable auth module for other projects
 
-## Quick Start
+## Quick Start with OpenCode (Recommended)
+
+### 1. Install the Plugin
+
+```bash
+# In your project directory
+bun add opencode-cursor-auth
+```
+
+Or for local development, create `.opencode/plugin/cursor-auth.ts`:
+
+```typescript
+export { CursorOAuthPlugin } from "opencode-cursor-auth";
+```
+
+### 2. Configure OpenCode
+
+Add to your `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "cursor": {
+      "name": "Cursor"
+    }
+  }
+}
+```
+
+That's it! The plugin will:
+- Handle OAuth authentication with Cursor
+- Automatically discover and register all available models
+- Provide a custom fetch handler (no proxy server needed)
+
+### 3. Authenticate
+
+Run OpenCode and authenticate via the auth menu (`ctrl+p` → auth → Cursor → OAuth).
+
+## Standalone Server Usage
+
+If you prefer to run a standalone proxy server (for non-OpenCode clients):
 
 ### Prerequisites
 
@@ -31,37 +72,24 @@ An OpenAI-compatible proxy server that routes requests through Cursor's AI backe
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/Yukaii/opencode-cursor-auth.git
 cd opencode-cursor-auth
-
-# Install dependencies
 bun install
 ```
 
 ### Authentication
 
-The server can authenticate via:
+```bash
+# Interactive login
+bun run demo:login
 
-1. **Environment variable** (recommended for quick testing):
-   ```bash
-   export CURSOR_ACCESS_TOKEN="your_cursor_access_token"
-   ```
-
-2. **Credential file** (automatically used if logged in via Cursor CLI):
-   - macOS: `~/.cursor/auth.json`
-   - Linux: `~/.config/cursor/auth.json`
-   - Windows: `%APPDATA%\Cursor\auth.json`
-
-3. **Interactive login**:
-   ```bash
-   bun run demo:login
-   ```
+# Or set environment variable
+export CURSOR_ACCESS_TOKEN="your_cursor_access_token"
+```
 
 ### Running the Server
 
 ```bash
-# Start the OpenAI-compatible proxy server
 bun run server
 
 # Or with custom port
@@ -88,7 +116,7 @@ The server starts on `http://localhost:18741` by default.
 curl http://localhost:18741/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sonnet-4.5",
+    "model": "claude-4-sonnet",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
@@ -108,7 +136,7 @@ const client = new OpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "sonnet-4.5",
+  model: "claude-4-sonnet",
   messages: [{ role: "user", content: "Explain quantum computing" }],
   stream: true,
 });
@@ -117,132 +145,6 @@ for await (const chunk of response) {
   process.stdout.write(chunk.choices[0]?.delta?.content || "");
 }
 ```
-
-### With OpenCode
-
-Add to your `opencode.json` configuration:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "cursor": {
-      "name": "Cursor",
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "baseURL": "http://127.0.0.1:18741/v1",
-        "apiKey": "cursor-via-opencode"
-      },
-      "models": {
-        "auto": {
-          "name": "Auto",
-          "temperature": true,
-          "attachment": true
-        },
-        "claude-4.5-sonnet": {
-          "name": "Claude 4.5 Sonnet",
-          "temperature": true,
-          "attachment": true
-        },
-        "claude-4.5-sonnet-thinking": {
-          "name": "Claude 4.5 Sonnet (Thinking)",
-          "temperature": true,
-          "attachment": true,
-          "reasoning": true
-        },
-        "claude-4.5-opus-high": {
-          "name": "Claude 4.5 Opus",
-          "temperature": true,
-          "attachment": true
-        },
-        "claude-4.5-opus-high-thinking": {
-          "name": "Claude 4.5 Opus (Thinking)",
-          "temperature": true,
-          "attachment": true,
-          "reasoning": true
-        },
-        "claude-4-opus": {
-          "name": "Claude 4.1 Opus",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-4o": {
-          "name": "GPT-4o",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-5.1": {
-          "name": "GPT-5.1",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-5.1-high": {
-          "name": "GPT-5.1 High",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-5.1-codex": {
-          "name": "GPT-5.1 Codex",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-5.1-codex-high": {
-          "name": "GPT-5.1 Codex High",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-5.1-codex-max": {
-          "name": "GPT-5.1 Codex Max",
-          "temperature": true,
-          "attachment": true
-        },
-        "gpt-5.1-codex-max-high": {
-          "name": "GPT-5.1 Codex Max High",
-          "temperature": true,
-          "attachment": true
-        },
-        "gemini-3-pro": {
-          "name": "Gemini 3 Pro",
-          "temperature": true,
-          "attachment": true
-        },
-        "grok-code-fast-1": {
-          "name": "Grok",
-          "temperature": true,
-          "attachment": true
-        },
-        "composer-1": {
-          "name": "Composer 1",
-          "temperature": true,
-          "attachment": true
-        }
-      }
-    }
-  }
-}
-```
-
-#### Plugin Setup (Pre-NPM Publishing)
-
-Before the package is published to npm, you need to manually set up the plugin for local development. Create a file at `.opencode/plugin/cursor-auth.ts` in your project:
-
-```typescript
-/**
- * OpenCode Cursor Auth Plugin - Local Development Wrapper
- *
- * This file re-exports the Cursor OAuth plugin for local testing with OpenCode.
- * OpenCode automatically discovers plugins in .opencode/plugin/*.ts
- *
- * Usage:
- *   1. Run `opencode` in this directory
- *   2. The plugin will be auto-loaded
- *   3. Configure a provider with id "cursor" to use this auth
- */
-
-export { CursorOAuthPlugin } from "../../src/plugin/index.ts";
-```
-
-This allows OpenCode to discover and load the Cursor authentication plugin during local development.
 
 ## Tool Calling
 
@@ -257,16 +159,6 @@ The proxy supports full OpenAI-compatible tool calling. When tools are provided,
 | `grep` | `grep` / `glob` | Search file contents / patterns |
 | `mcp` | Original name | MCP tool passthrough |
 
-### Tool Flow
-
-```
-1. Client sends request with tools array
-2. Server returns tool_calls in response
-3. Client executes tools locally
-4. Client sends new request with tool results
-5. Server returns final response
-```
-
 ## Configuration
 
 ### Environment Variables
@@ -275,34 +167,20 @@ The proxy supports full OpenAI-compatible tool calling. When tools are provided,
 |----------|-------------|---------|
 | `PORT` | Server port | `18741` |
 | `CURSOR_ACCESS_TOKEN` | Direct access token | - |
-| `CURSOR_SESSION_REUSE` | Enable experimental session reuse | `0` |
+| `CURSOR_DEBUG` | Enable debug logging | `0` |
 
 ### Available Models
 
-Models are fetched dynamically from Cursor's API. Current models include:
+Models are fetched dynamically from Cursor's API. Common models include:
 
-**Claude (Anthropic)**
-- `sonnet-4.5` - Claude 4.5 Sonnet
-- `sonnet-4.5-thinking` - Claude 4.5 Sonnet (Thinking)
-- `opus-4.5` - Claude 4.5 Opus
-- `opus-4.5-thinking` - Claude 4.5 Opus (Thinking)
-- `opus-4.1` - Claude 4.1 Opus
-
-**GPT (OpenAI)**
-- `gpt-5.1` - GPT-5.1
-- `gpt-5.1-high` - GPT-5.1 High
-- `gpt-5.1-codex` - GPT-5.1 Codex
-- `gpt-5.1-codex-high` - GPT-5.1 Codex High
-- `gpt-5.1-codex-max` - GPT-5.1 Codex Max
-- `gpt-5.1-codex-max-high` - GPT-5.1 Codex Max High
-
-**Other**
-- `gemini-3-pro` - Gemini 3 Pro (Google)
-- `grok` - Grok (xAI)
 - `auto` - Auto-select best model
+- `claude-4-sonnet` - Claude 4 Sonnet
+- `claude-4-sonnet-thinking` - Claude 4 Sonnet (Thinking)
+- `gpt-4o` - GPT-4o
+- `gemini-2.5-pro` - Gemini 2.5 Pro
 - `composer-1` - Cursor Composer
 
-Use `/v1/models` to get the full list. Model availability may change.
+Use `/v1/models` or check the OpenCode model picker for the full list.
 
 ## Architecture
 
@@ -312,11 +190,11 @@ Use `/v1/models` to get the full list. Model availability may change.
 │   Client    │◀────│  (this project) │◀────│   API       │
 └─────────────┘     └─────────────────┘     └─────────────┘
 
-The proxy:
-1. Accepts OpenAI-format requests
-2. Translates to Cursor's Agent API (gRPC-Web)
-3. Streams responses back as OpenAI SSE
-4. Maps tool calls bidirectionally
+For OpenCode Plugin:
+┌─────────────┐     ┌─────────────────┐     ┌─────────────┐
+│   OpenCode  │────▶│  Custom Fetch   │────▶│   Cursor    │
+│             │◀────│  (no server)    │◀────│   API       │
+└─────────────┘     └─────────────────┘     └─────────────┘
 ```
 
 ## Project Structure
@@ -324,19 +202,19 @@ The proxy:
 ```
 opencode-cursor-auth/
 ├── src/
-│   ├── server.ts           # Main proxy server
-│   ├── index.ts            # Plugin exports
+│   ├── server.ts              # Standalone proxy server
+│   ├── index.ts               # Plugin exports
 │   ├── lib/
 │   │   ├── api/
-│   │   │   └── agent-service.ts  # Cursor Agent API client
-│   │   ├── auth/               # Authentication helpers
-│   │   ├── proto/              # Protobuf utilities
-│   │   └── storage.ts          # Credential storage
+│   │   │   ├── agent-service.ts   # Cursor Agent API client
+│   │   │   └── cursor-models.ts   # Model discovery
+│   │   ├── auth/                  # Authentication helpers
+│   │   ├── openai-compat/         # OpenAI compatibility layer
+│   │   └── storage.ts             # Credential storage
 │   └── plugin/
-│       └── plugin.ts           # OpenCode plugin implementation
-├── docs/                       # Documentation
-├── scripts/                    # Utility scripts
-└── cursor-agent-restored-source-code/  # Reference implementation
+│       └── plugin.ts              # OpenCode plugin implementation
+├── docs/                          # Documentation
+└── scripts/                       # Utility scripts
 ```
 
 ## Documentation
@@ -344,15 +222,12 @@ opencode-cursor-auth/
 - [Authentication Flow](docs/AUTH.md) - Detailed auth documentation
 - [Cursor API Reference](docs/CURSOR_API.md) - Cursor's API protocol
 - [Architecture Comparison](docs/ARCHITECTURE_COMPARISON.md) - OpenAI vs Cursor differences
-- [Tool Calling Investigation](docs/TOOL_CALLING_INVESTIGATION.md) - Tool implementation details
-- [Future Work](docs/FUTURE_WORK.md) - Planned improvements
+- [OpenCode Plugin](docs/OPENCODE_PLUGIN.md) - Plugin implementation details
 
 ## Known Limitations
 
-1. **Session Reuse**: Session reuse via BidiAppend is disabled by default due to KV blob storage issues. Each request creates a fresh session.
-
-2. **Non-streaming Tool Results**: Tool results must be sent in a new request (not the same stream).
-
+1. **Session Reuse**: Each request creates a fresh session (session reuse is experimental).
+2. **Non-streaming Tool Results**: Tool results must be sent in a new request.
 3. **Usage Metrics**: Token usage is estimated, not exact.
 
 ## Development
@@ -362,7 +237,7 @@ opencode-cursor-auth/
 bun test
 
 # Run with debug logging
-DEBUG=1 bun run server
+CURSOR_DEBUG=1 bun run server
 
 # Run demo scripts
 bun run demo:status    # Check auth status
@@ -378,8 +253,8 @@ Run `bun run demo:login` to authenticate, or set `CURSOR_ACCESS_TOKEN` environme
 ### Tool calls not working
 Ensure you're including the `tools` array in your request. The proxy only emits tool calls when tools are provided.
 
-### Stream hangs after tool execution
-This is expected behavior when session reuse is enabled. Disable with `CURSOR_SESSION_REUSE=0` (default).
+### Debug logging
+Set `CURSOR_DEBUG=1` to enable verbose logging for troubleshooting.
 
 ## License
 
