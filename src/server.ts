@@ -27,6 +27,10 @@ import {
   type SessionLike,
 } from "./lib/session-reuse";
 
+// Debug logging - set CURSOR_DEBUG=1 to enable
+const DEBUG = process.env.CURSOR_DEBUG === "1";
+const debugLog = DEBUG ? console.log.bind(console) : () => {};
+
 // --- Constants ---
 
 const API_BASE = "https://api2.cursor.sh";
@@ -583,7 +587,7 @@ function streamCursorSession(
           } else if (chunk.type === "kv_blob_assistant" && chunk.blobContent) {
             // Session reuse: Assistant response was stored in KV blob instead of streaming
             // Emit the blob content as text to the OpenAI client
-            console.log(`[Session ${session.id}] Emitting KV blob assistant content (${chunk.blobContent.length} chars)`);
+            debugLog(`[Session ${session.id}] Emitting KV blob assistant content (${chunk.blobContent.length} chars)`);
             const streamChunk: OpenAIStreamChunk = {
               id: completionId,
               object: "chat.completion.chunk",
@@ -602,7 +606,7 @@ function streamCursorSession(
             // Track file-modifying tool calls (edit, apply_diff) - they require internal read first
             if (chunk.toolCall.name === "edit" || chunk.toolCall.name === "apply_diff") {
               pendingEditToolCall = chunk.toolCall.callId;
-              console.log(`[Session ${session.id}] File-modifying tool started (${chunk.toolCall.name}), will handle internal read locally`);
+              debugLog(`[Session ${session.id}] File-modifying tool started (${chunk.toolCall.name}), will handle internal read locally`);
             }
             // Don't emit tool_call_started to client - we wait for exec_request
           } else if (chunk.type === "tool_call_completed" && chunk.toolCall) {
@@ -613,7 +617,7 @@ function streamCursorSession(
           } else if (chunk.type === "exec_request" && chunk.execRequest) {
             // Handle internal reads for edit flows
             if (chunk.execRequest.type === "read" && pendingEditToolCall) {
-              console.log(`[Session ${session.id}] Handling internal read for edit flow locally`);
+              debugLog(`[Session ${session.id}] Handling internal read for edit flow locally`);
               try {
                 const file = Bun.file(chunk.execRequest.path);
                 const content = await file.text();
@@ -628,7 +632,7 @@ function streamCursorSession(
                   BigInt(stats.size),
                   false
                 );
-                console.log(`[Session ${session.id}] Internal read completed, sent result to Cursor`);
+                debugLog(`[Session ${session.id}] Internal read completed, sent result to Cursor`);
               } catch (err: any) {
                 await session.client.sendReadResult(
                   chunk.execRequest.id,
@@ -751,12 +755,12 @@ function streamCursorSession(
             continue;
           } else if (chunk.type === "exec_server_abort") {
             // Server sent abort signal for exec - log and continue
-            console.log(`[Session ${session.id}] Received exec_server_abort from Cursor`);
+            debugLog(`[Session ${session.id}] Received exec_server_abort from Cursor`);
             continue;
           } else if (chunk.type === "interaction_query") {
             // Server is asking for user interaction (web search approval, etc.)
             // For now, log it - we may need to auto-approve or handle differently
-            console.log(`[Session ${session.id}] Received interaction_query: id=${chunk.queryId}, type=${chunk.queryType}`);
+            debugLog(`[Session ${session.id}] Received interaction_query: id=${chunk.queryId}, type=${chunk.queryType}`);
             // TODO: May need to send InteractionResponse back via BidiAppend
             continue;
           } else if (chunk.type === "done") {
@@ -842,7 +846,7 @@ async function streamWithSessionReuse(
           toolMessages.forEach((m) => m.tool_call_id && unmapToolCall(m.tool_call_id));
           mappedSession.state = "running";
           mappedSession.lastActivity = Date.now();
-          console.log(
+          debugLog(
             `[SESSION] Resuming via mapping ${mappedSession.id} model=${mappedSession.model ?? model} tools=${toolMessages.length}`
           );
           return streamCursorSession(mappedSession, mappedSession.model ?? model, mappedSession.completionId, true);
@@ -864,7 +868,7 @@ async function streamWithSessionReuse(
         }
         existing.state = "running";
         existing.lastActivity = Date.now();
-        console.log(
+        debugLog(
           `[SESSION] Resuming session ${existing.id} model=${existing.model ?? model} tools=${toolMessages.length}`
         );
         return streamCursorSession(existing, existing.model ?? model, existing.completionId, true);
@@ -890,7 +894,7 @@ async function streamWithSessionReuse(
           toolMessages.forEach((m) => m.tool_call_id && unmapToolCall(m.tool_call_id));
           mappedSession.state = "running";
           mappedSession.lastActivity = Date.now();
-          console.log(
+          debugLog(
             `[SESSION] Resuming via mapping ${mappedSession.id} model=${mappedSession.model ?? model} tools=${toolMessages.length}`
           );
           return streamCursorSession(mappedSession, mappedSession.model ?? model, mappedSession.completionId, true);
@@ -917,7 +921,7 @@ async function streamWithSessionReuse(
     .filter(m => m.role === "tool").length;
   
   if (toolCallCount > 0) {
-    console.log(`[SESSION] ${toolResultCount}/${toolCallCount} tool calls have results, passing ${toolsToPass?.length ?? 0} tools`);
+    debugLog(`[SESSION] ${toolResultCount}/${toolCallCount} tool calls have results, passing ${toolsToPass?.length ?? 0} tools`);
   }
   
   const iterator = client.chatStream({
@@ -942,7 +946,7 @@ async function streamWithSessionReuse(
   };
 
   cursorSessions.set(sessionId, session);
-  console.log(
+  debugLog(
     `[SESSION] New session ${sessionId} model=${model} tools=${(body.tools as any[] | undefined)?.length ?? 0}`
   );
 
@@ -1018,24 +1022,24 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
             // Built-in tools (edit, read, shell, etc.) are handled via exec_requests internally
             const isMcpTool = chunk.toolCall.toolType === "mcp_tool_call";
             if (isMcpTool) {
-              console.log(`[DEBUG] MCP Tool call started: ${chunk.toolCall.name}`);
+              debugLog(`[DEBUG] MCP Tool call started: ${chunk.toolCall.name}`);
             } else {
-              console.log(`[DEBUG] Built-in tool call started (handling via exec_request): ${chunk.toolCall.name}`);
+              debugLog(`[DEBUG] Built-in tool call started (handling via exec_request): ${chunk.toolCall.name}`);
               // Track file-modifying tool calls - they may require an internal read first which we should handle locally
               // This includes: edit, apply_diff, and potentially others
               if (chunk.toolCall.name === "edit" || chunk.toolCall.name === "apply_diff") {
                 pendingEditToolCall = chunk.toolCall.callId;
-                console.log(`[DEBUG] File-modifying tool started (${chunk.toolCall.name}), will handle internal read locally. callId: ${pendingEditToolCall}`);
+                debugLog(`[DEBUG] File-modifying tool started (${chunk.toolCall.name}), will handle internal read locally. callId: ${pendingEditToolCall}`);
               }
             }
             toolCallIdMap.set(chunk.toolCall.callId, toolCallIndex++);
           } else if (chunk.type === "partial_tool_call" && chunk.toolCall && chunk.partialArgs) {
-            console.log(`[DEBUG] Partial tool call for: ${chunk.toolCall.callId}`);
+            debugLog(`[DEBUG] Partial tool call for: ${chunk.toolCall.callId}`);
           } else if (chunk.type === "tool_call_completed" && chunk.toolCall) {
-            console.log(`[DEBUG] Tool call completed: ${chunk.toolCall.name}`);
+            debugLog(`[DEBUG] Tool call completed: ${chunk.toolCall.name}`);
           } else if (chunk.type === "exec_request" && chunk.execRequest) {
             const execReq = chunk.execRequest;
-            console.log("[DEBUG] Received exec_request:", { type: execReq.type, id: execReq.id });
+            debugLog("[DEBUG] Received exec_request:", { type: execReq.type, id: execReq.id });
 
             const toolsProvided = tools && tools.length > 0;
 
@@ -1047,7 +1051,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
             // Skip reads that are part of an edit flow - Cursor internally reads before editing
             // We don't want to emit these as standalone tool calls
             if (execReq.type === "read" && pendingEditToolCall) {
-              console.log(`[DEBUG] Skipping internal read for edit flow, executing locally instead`);
+              debugLog(`[DEBUG] Skipping internal read for edit flow, executing locally instead`);
               // Execute the read internally and send result back to Cursor
               try {
                 const file = Bun.file(execReq.path);
@@ -1055,7 +1059,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                 const stats = await file.stat();
                 const totalLines = content.split("\n").length;
                 await client.sendReadResult(execReq.id, execReq.execId, content, execReq.path, totalLines, BigInt(stats.size), false);
-                console.log(`[DEBUG] Internal read completed for edit, sent result to Cursor`);
+                debugLog(`[DEBUG] Internal read completed for edit, sent result to Cursor`);
               } catch (err: any) {
                 await client.sendReadResult(execReq.id, execReq.execId, `Error: ${err.message}`, execReq.path, 0, 0n, false);
               }
@@ -1077,7 +1081,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                 // This ensures unique IDs across different requests
                 const openaiToolCallId = `call_${completionId.slice(9, 17)}_${currentIndex}`;
 
-                console.log(`[DEBUG] Emitting tool_call to client: ${toolName} (type: ${execReq.type})`);
+                debugLog(`[DEBUG] Emitting tool_call to client: ${toolName} (type: ${execReq.type})`);
 
                 const toolCallChunk: OpenAIStreamChunk = {
                   id: completionId,
@@ -1125,14 +1129,14 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                 isClosed = true;
                 controller.close();
 
-                console.log("[DEBUG] OpenAI stream closed for tool call. Client will send tool results in new request.");
+                debugLog("[DEBUG] OpenAI stream closed for tool call. Client will send tool results in new request.");
                 return;
               }
             }
             
             // If no tools provided, execute built-in tools internally (fallback for non-OpenCode clients)
             if (!toolsProvided && execReq.type !== "mcp") {
-              console.log(`[DEBUG] Executing built-in tool internally (no tools provided): ${execReq.type}`);
+              debugLog(`[DEBUG] Executing built-in tool internally (no tools provided): ${execReq.type}`);
               if (execReq.type === "shell") {
                 const startTime = Date.now();
                 const cwd = execReq.cwd || process.cwd();
@@ -1142,10 +1146,10 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                   const stderr = await new Response(proc.stderr).text();
                   const exitCode = await proc.exited;
                   const executionTimeMs = Date.now() - startTime;
-                  console.log(`[DEBUG] Shell result (exit=${exitCode}): ${(stdout + stderr).slice(0, 200)}`);
+                  debugLog(`[DEBUG] Shell result (exit=${exitCode}): ${(stdout + stderr).slice(0, 200)}`);
 
                   await client.sendShellResult(execReq.id, execReq.execId, execReq.command, cwd, stdout, stderr, exitCode, executionTimeMs);
-                  console.log("[DEBUG] Sent shell result");
+                  debugLog("[DEBUG] Sent shell result");
                   toolExecutionCompleted = true;
                 } catch (err: any) {
                   console.error("[ERROR] Shell execution failed:", err.message);
@@ -1154,14 +1158,14 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                   toolExecutionCompleted = true;
                 }
               } else if (execReq.type === "read") {
-                console.log(`[DEBUG] Reading file: ${execReq.path}`);
+                debugLog(`[DEBUG] Reading file: ${execReq.path}`);
                 try {
                   const file = Bun.file(execReq.path);
                   const content = await file.text();
                   const stats = await file.stat();
                   const totalLines = content.split("\n").length;
                   await client.sendReadResult(execReq.id, execReq.execId, content, execReq.path, totalLines, BigInt(stats.size), false);
-                  console.log("[DEBUG] Sent read result");
+                  debugLog("[DEBUG] Sent read result");
                   toolExecutionCompleted = true;
                 } catch (err: any) {
                   console.error("[ERROR] Read failed:", err.message);
@@ -1169,13 +1173,13 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                   toolExecutionCompleted = true;
                 }
               } else if (execReq.type === "ls") {
-                console.log(`[DEBUG] Listing directory: ${execReq.path}`);
+                debugLog(`[DEBUG] Listing directory: ${execReq.path}`);
                 try {
                   const { readdir } = await import("node:fs/promises");
                   const entries = await readdir(execReq.path, { withFileTypes: true });
                   const files = entries.map((e) => e.isDirectory() ? `${e.name}/` : e.name).join("\n");
                   await client.sendLsResult(execReq.id, execReq.execId, files);
-                  console.log("[DEBUG] Sent ls result");
+                  debugLog("[DEBUG] Sent ls result");
                   toolExecutionCompleted = true;
                 } catch (err: any) {
                   console.error("[ERROR] ls failed:", err.message);
@@ -1183,7 +1187,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                   toolExecutionCompleted = true;
                 }
               } else if (execReq.type === "grep") {
-                console.log(`[DEBUG] grep/glob request: pattern=${execReq.pattern || execReq.glob}, path=${execReq.path || process.cwd()}`);
+                debugLog(`[DEBUG] grep/glob request: pattern=${execReq.pattern || execReq.glob}, path=${execReq.path || process.cwd()}`);
                 try {
                   let files: string[] = [];
                   if (execReq.glob) {
@@ -1195,7 +1199,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                     files = stdout.split("\n").filter((f) => f.length > 0);
                   }
                   await client.sendGrepResult(execReq.id, execReq.execId, execReq.pattern || execReq.glob || "", execReq.path || process.cwd(), files);
-                  console.log("[DEBUG] Sent grep result");
+                  debugLog("[DEBUG] Sent grep result");
                   toolExecutionCompleted = true;
                 } catch (err: any) {
                   console.error("[ERROR] grep/glob failed:", err.message);
@@ -1203,7 +1207,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                   toolExecutionCompleted = true;
                 }
               } else if (execReq.type === "write") {
-                console.log(`[DEBUG] Writing file: ${execReq.path}`);
+                debugLog(`[DEBUG] Writing file: ${execReq.path}`);
                 try {
                   const { dirname } = await import("node:path");
                   const { mkdir } = await import("node:fs/promises");
@@ -1238,7 +1242,7 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
                   };
                   
                   await client.sendWriteResult(execReq.id, execReq.execId, resultData);
-                  console.log("[DEBUG] Sent write result");
+                  debugLog("[DEBUG] Sent write result");
                   toolExecutionCompleted = true;
                 } catch (err: any) {
                   console.error("[ERROR] Write failed:", err.message);
@@ -1255,20 +1259,20 @@ async function legacyStreamResponse({ body, model, prompt, completionId, created
               // Wait much longer to see if server eventually sends text
               // Native Cursor CLI has no heartbeat limit - it waits indefinitely
               if (heartbeatCountAfterExec >= 300) {  // ~5 minutes at 1 heartbeat/sec
-                console.log("[DEBUG] Closing stream after heartbeat threshold post tool execution");
+                debugLog("[DEBUG] Closing stream after heartbeat threshold post tool execution");
                 break;
               }
               if (heartbeatCountAfterExec % 30 === 0) {
-                console.log(`[DEBUG] ${heartbeatCountAfterExec} heartbeats since tool execution, still waiting...`);
+                debugLog(`[DEBUG] ${heartbeatCountAfterExec} heartbeats since tool execution, still waiting...`);
               }
             }
           } else if (chunk.type === "checkpoint") {
             continue;
           } else if (chunk.type === "exec_server_abort") {
-            console.log("[DEBUG] Received exec_server_abort from Cursor");
+            debugLog("[DEBUG] Received exec_server_abort from Cursor");
             continue;
           } else if (chunk.type === "interaction_query") {
-            console.log(`[DEBUG] Received interaction_query: id=${chunk.queryId}, type=${chunk.queryType}`);
+            debugLog(`[DEBUG] Received interaction_query: id=${chunk.queryId}, type=${chunk.queryType}`);
             continue;
           } else if (chunk.type === "done") {
             break;
@@ -1400,12 +1404,12 @@ async function handleChatCompletions(req: Request, accessToken: string): Promise
   // Log conversation structure
   const toolMessages = body.messages.filter(m => m.role === "tool");
   const assistantWithToolCalls = body.messages.filter(m => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0);
-  console.log(`[DEBUG] Chat request: ${body.messages.length} messages, ${toolMessages.length} tool results, ${assistantWithToolCalls.length} assistant tool calls`);
+  debugLog(`[DEBUG] Chat request: ${body.messages.length} messages, ${toolMessages.length} tool results, ${assistantWithToolCalls.length} assistant tool calls`);
   if (toolMessages.length > 0) {
-    console.log(`[DEBUG] Tool results:`, toolMessages.map(m => ({ tool_call_id: m.tool_call_id, content_length: (m.content ?? "").length })));
+    debugLog(`[DEBUG] Tool results:`, toolMessages.map(m => ({ tool_call_id: m.tool_call_id, content_length: (m.content ?? "").length })));
   }
-  console.log(`[DEBUG] Prompt (first 500 chars):`, prompt.slice(0, 500));
-  console.log(`[DEBUG] Prompt (last 500 chars):`, prompt.slice(-500));
+  debugLog(`[DEBUG] Prompt (first 500 chars):`, prompt.slice(0, 500));
+  debugLog(`[DEBUG] Prompt (last 500 chars):`, prompt.slice(-500));
 
   if (stream) {
     // Use session reuse when enabled via env flag
@@ -1575,15 +1579,15 @@ const PORT = parseInt(process.env.PORT ?? "18741", 10);
 // This requires KV blob extraction to work properly
 const SESSION_REUSE_ENABLED = process.env.CURSOR_SESSION_REUSE === "1";
 
-console.log("Starting OpenAI-compatible API server...");
+debugLog("Starting OpenAI-compatible API server...");
 if (SESSION_REUSE_ENABLED) {
-  console.log("[SESSION_REUSE] Experimental session reuse is ENABLED");
+  debugLog("[SESSION_REUSE] Experimental session reuse is ENABLED");
 }
 
 let accessToken: string;
 try {
   accessToken = await getAccessToken();
-  console.log("Access token loaded successfully");
+  debugLog("Access token loaded successfully");
 } catch (err: any) {
   console.error("Failed to get access token:", err.message);
   process.exit(1);
@@ -1630,7 +1634,7 @@ const server = Bun.serve({
   },
 });
 
-console.log(`
+debugLog(`
 ╔════════════════════════════════════════════════════════════╗
 ║  OpenAI-Compatible API Server                              ║
 ╠════════════════════════════════════════════════════════════╣

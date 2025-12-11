@@ -10,17 +10,6 @@
 
 import { exec } from "node:child_process";
 import { platform } from "node:os";
-import { appendFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
-// Debug logging to file
-const LOG_FILE = join(homedir(), "cursor-plugin-debug.log");
-function debugLog(...args: unknown[]) {
-  const timestamp = new Date().toISOString();
-  const message = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' ');
-  appendFileSync(LOG_FILE, `[${timestamp}] ${message}\n`);
-}
 
 import {
   LoginManager,
@@ -184,37 +173,37 @@ export const CursorOAuthPlugin = async ({
       getAuth: GetAuth,
       providerArg: Provider
     ): Promise<LoaderResult | null> => {
-      debugLog("[Cursor Plugin] Loader called");
-      debugLog("[Cursor Plugin] providerArg:", providerArg);
+      // debugLog("[Cursor Plugin] Loader called");
+      // debugLog("[Cursor Plugin] providerArg:", providerArg);
       const auth = await getAuth();
 
       if (!isOAuthAuth(auth)) {
-        debugLog("[Cursor Plugin] No OAuth auth found, returning null");
+        // debugLog("[Cursor Plugin] No OAuth auth found, returning null");
         return null;
       }
 
-      debugLog("[Cursor Plugin] OAuth auth found, checking token expiry");
+      // debugLog("[Cursor Plugin] OAuth auth found, checking token expiry");
 
       // Refresh token if needed
       let authRecord = auth;
       if (accessTokenExpired(authRecord)) {
-        debugLog("[Cursor Plugin] Token expired, refreshing...");
+        // debugLog("[Cursor Plugin] Token expired, refreshing...");
         const refreshed = await refreshCursorAccessToken(authRecord, client);
         if (refreshed) {
           authRecord = refreshed;
-          debugLog("[Cursor Plugin] Token refreshed successfully");
+          // debugLog("[Cursor Plugin] Token refreshed successfully");
         } else {
-          debugLog("[Cursor Plugin] Token refresh failed");
+          // debugLog("[Cursor Plugin] Token refresh failed");
         }
       }
 
       const accessToken = authRecord.access;
       if (!accessToken) {
-        debugLog("[Cursor Plugin] No access token available");
+        // debugLog("[Cursor Plugin] No access token available");
         return null;
       }
 
-      debugLog("[Cursor Plugin] Access token available");
+      // debugLog("[Cursor Plugin] Access token available");
 
       // Ensure provider and provider.models exist
       const provider = providerArg ?? ({} as Provider);
@@ -229,10 +218,10 @@ export const CursorOAuthPlugin = async ({
 
       // Dynamically populate provider models from Cursor API if available.
       try {
-        debugLog("[Cursor Plugin] Fetching models from Cursor API...");
+        // debugLog("[Cursor Plugin] Fetching models from Cursor API...");
         const cursorClient = new CursorClient(accessToken);
         const models = await listCursorModels(cursorClient);
-        debugLog("[Cursor Plugin] Fetched", models.length, "models from Cursor API");
+        // debugLog("[Cursor Plugin] Fetched", models.length, "models from Cursor API");
         if (models.length > 0) {
           for (const m of models) {
             // Determine if this is a "thinking" (reasoning) model
@@ -306,16 +295,15 @@ export const CursorOAuthPlugin = async ({
           }
         }
       } catch (error) {
-        debugLog("[Cursor Plugin] Failed to list models; continuing with defaults.", error);
+        // Silently continue with defaults if model listing fails
       }
 
       // Create custom fetch function instead of starting proxy server
       const customFetch = createPluginFetch({
         accessToken,
-        log: (msg, ...args) => debugLog(msg, ...args),
+        // Disable logging to avoid polluting the UI
+        log: () => {},
       });
-
-      debugLog("[Cursor Plugin] Returning custom fetch handler");
 
       // We need to provide baseURL even when using custom fetch
       // OpenCode uses baseURL to identify the provider/API for the model
@@ -325,7 +313,7 @@ export const CursorOAuthPlugin = async ({
         baseURL: "https://cursor.opencode.local/v1", // Virtual URL, intercepted by fetch
         fetch: customFetch,
       };
-      debugLog("[Cursor Plugin] Returning:", { apiKey: result.apiKey, baseURL: result.baseURL, hasFetch: !!result.fetch });
+      // debugLog("[Cursor Plugin] Returning:", { apiKey: result.apiKey, baseURL: result.baseURL, hasFetch: !!result.fetch });
       return result;
     },
 

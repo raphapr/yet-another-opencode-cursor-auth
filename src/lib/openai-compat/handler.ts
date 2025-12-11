@@ -62,7 +62,7 @@ export interface RequestHandlerOptions {
  * ```
  */
 export function createRequestHandler(options: RequestHandlerOptions) {
-  const { accessToken, log = console.log } = options;
+  const { accessToken, log = () => {} } = options;
 
   return async function handleRequest(req: Request): Promise<Response> {
     const url = new URL(req.url);

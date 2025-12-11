@@ -34,6 +34,10 @@
 import { randomUUID } from "node:crypto";
 import { generateChecksum, addConnectEnvelope } from "./cursor-client";
 
+// Debug logging - set to true to enable verbose logging
+const DEBUG = process.env.CURSOR_DEBUG === "1";
+const debugLog = DEBUG ? console.log.bind(console) : () => {};
+
 // Cursor API URL (main API)
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 
@@ -341,7 +345,7 @@ function buildRequestContext(workspacePath?: string, tools?: OpenAIToolDefinitio
   // Use "cursor-tools" as provider identifier to look like a built-in tool provider
   const MCP_PROVIDER = "cursor-tools";
   if (tools && tools.length > 0) {
-    console.log(`[DEBUG] Adding ${tools.length} tools to RequestContext.tools (field 7)`);
+    debugLog(`[DEBUG] Adding ${tools.length} tools to RequestContext.tools (field 7)`);
     for (const tool of tools) {
       const mcpTool = encodeMcpToolDefinition(tool, MCP_PROVIDER);
       parts.push(encodeMessageField(7, mcpTool));
@@ -356,7 +360,7 @@ function buildRequestContext(workspacePath?: string, tools?: OpenAIToolDefinitio
 
     const mcpInstr = encodeMcpInstructions(MCP_PROVIDER, instructions);
     parts.push(encodeMessageField(14, mcpInstr));
-    console.log(`[DEBUG] Added MCP instructions for ${MCP_PROVIDER} server`);
+    debugLog(`[DEBUG] Added MCP instructions for ${MCP_PROVIDER} server`);
   }
 
   return concatBytes(...parts);
@@ -369,7 +373,7 @@ function buildRequestContext(workspacePath?: string, tools?: OpenAIToolDefinitio
  * - mode: field 4 (enum/int32)
  */
 function encodeUserMessage(text: string, messageId: string, mode: AgentMode = AgentMode.ASK): Uint8Array {
-  console.log(`[DEBUG] encodeUserMessage: mode=${mode} (${AgentMode[mode]}), messageId=${messageId}`);
+  debugLog(`[DEBUG] encodeUserMessage: mode=${mode} (${AgentMode[mode]}), messageId=${messageId}`);
   return concatBytes(
     encodeStringField(1, text),
     encodeStringField(2, messageId),
@@ -537,7 +541,7 @@ function encodeAgentRunRequest(
   if (tools && tools.length > 0) {
     const mcpToolsWrapper = encodeMcpTools(tools);
     parts.push(encodeMessageField(4, mcpToolsWrapper));
-    console.log(`[DEBUG] Added mcp_tools (field 4) to AgentRunRequest with ${tools.length} tools`);
+    debugLog(`[DEBUG] Added mcp_tools (field 4) to AgentRunRequest with ${tools.length} tools`);
   }
 
   // Add conversation_id if provided (field 5)
@@ -557,7 +561,7 @@ function encodeAgentRunRequest(
     }];
     const mcpFsOptions = encodeMcpFileSystemOptions(true, workspacePath, mcpDescriptors);
     parts.push(encodeMessageField(6, mcpFsOptions));
-    console.log(`[DEBUG] Added mcp_file_system_options (field 6) with workspace: ${workspacePath}`);
+    debugLog(`[DEBUG] Added mcp_file_system_options (field 6) with workspace: ${workspacePath}`);
   }
 
   return concatBytes(...parts);
@@ -1159,7 +1163,7 @@ function parseExecServerMessage(data: Uint8Array): ExecRequest | null {
     }
 
     if (result) {
-      console.log(`[DEBUG] Parsed ExecServerMessage: type=${result.type}, id=${id}`);
+      debugLog(`[DEBUG] Parsed ExecServerMessage: type=${result.type}, id=${id}`);
       break;
     }
   }
@@ -1964,7 +1968,7 @@ export class AgentServiceClient {
     this.baseUrl = options.baseUrl ?? CURSOR_API_URL;
     this.workspacePath = options.workspacePath ?? process.cwd();
     this.blobStore = new Map();
-    console.log(`[DEBUG] AgentServiceClient using baseUrl: ${this.baseUrl}`);
+    debugLog(`[DEBUG] AgentServiceClient using baseUrl: ${this.baseUrl}`);
   }
 
   private getHeaders(requestId?: string): Record<string, string> {
@@ -2029,7 +2033,7 @@ export class AgentServiceClient {
     const appendRequest = encodeBidiAppendRequest(hexData, requestId, appendSeqno);
     const envelope = addConnectEnvelope(appendRequest);
 
-    console.log(`[TIMING] bidiAppend: data=${data.length}bytes, hex=${hexData.length}chars, envelope=${envelope.length}bytes, encode=${Date.now() - startTime}ms`);
+    debugLog(`[TIMING] bidiAppend: data=${data.length}bytes, hex=${hexData.length}chars, envelope=${envelope.length}bytes, encode=${Date.now() - startTime}ms`);
 
     const url = `${this.baseUrl}/aiserver.v1.BidiService/BidiAppend`;
 
@@ -2039,7 +2043,7 @@ export class AgentServiceClient {
       headers: this.getHeaders(requestId),
       body: Buffer.from(envelope),
     });
-    console.log(`[TIMING] bidiAppend fetch took ${Date.now() - fetchStart}ms, status=${response.status}`);
+    debugLog(`[TIMING] bidiAppend fetch took ${Date.now() - fetchStart}ms, status=${response.status}`);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -2049,16 +2053,16 @@ export class AgentServiceClient {
     // Read the response body to see if there's any useful information
     const responseBody = await response.arrayBuffer();
     if (responseBody.byteLength > 0) {
-      console.log(`[DEBUG] BidiAppend response: ${responseBody.byteLength} bytes`);
+      debugLog(`[DEBUG] BidiAppend response: ${responseBody.byteLength} bytes`);
       const bytes = new Uint8Array(responseBody);
       // Parse as gRPC-Web envelope
       if (bytes.length >= 5) {
         const flags = bytes[0];
         const length = (bytes[1]! << 24) | (bytes[2]! << 16) | (bytes[3]! << 8) | bytes[4]!;
-        console.log(`[DEBUG] BidiAppend response: flags=${flags}, length=${length}, totalBytes=${bytes.length}`);
+        debugLog(`[DEBUG] BidiAppend response: flags=${flags}, length=${length}, totalBytes=${bytes.length}`);
         if (length > 0 && bytes.length >= 5 + length) {
           const payload = bytes.slice(5, 5 + length);
-          console.log(`[DEBUG] BidiAppend payload hex: ${Buffer.from(payload).toString('hex')}`);
+          debugLog(`[DEBUG] BidiAppend payload hex: ${Buffer.from(payload).toString('hex')}`);
         }
       }
     }
@@ -2146,87 +2150,87 @@ export class AgentServiceClient {
       // Enhanced debug: analyze blob data thoroughly to find assistant responses
       // Cursor may store responses in various formats (JSON, protobuf, text)
       const blobAnalysis = this.analyzeBlobData(kvMsg.blobData);
-      console.log(`[KV-BLOB] SET id=${kvMsg.id}, key=${key.slice(0, 16)}..., size=${kvMsg.blobData.length}b, type=${blobAnalysis.type}`);
+      debugLog(`[KV-BLOB] SET id=${kvMsg.id}, key=${key.slice(0, 16)}..., size=${kvMsg.blobData.length}b, type=${blobAnalysis.type}`);
       
       if (blobAnalysis.type === 'json') {
-        console.log(`[KV-BLOB]   JSON keys: ${Object.keys(blobAnalysis.json || {}).join(', ')}`);
+        debugLog(`[KV-BLOB]   JSON keys: ${Object.keys(blobAnalysis.json || {}).join(', ')}`);
         // Log the role field if present
         if (blobAnalysis.json?.role) {
-          console.log(`[KV-BLOB]   role="${blobAnalysis.json.role}"`);
+          debugLog(`[KV-BLOB]   role="${blobAnalysis.json.role}"`);
         }
         // Check for assistant response patterns
         if (blobAnalysis.json?.role === "assistant") {
           const content = blobAnalysis.json.content;
-          console.log(`[KV-BLOB]   content type: ${typeof content}, value: ${JSON.stringify(content)?.slice(0, 200)}`);
+          debugLog(`[KV-BLOB]   content type: ${typeof content}, value: ${JSON.stringify(content)?.slice(0, 200)}`);
           if (typeof content === "string" && content.length > 0) {
-            console.log(`[KV-BLOB]   ✓ Assistant response found! (${content.length} chars)`);
-            console.log(`[KV-BLOB]   Preview: ${content.slice(0, 150)}...`);
+            debugLog(`[KV-BLOB]   ✓ Assistant response found! (${content.length} chars)`);
+            debugLog(`[KV-BLOB]   Preview: ${content.slice(0, 150)}...`);
             this.pendingAssistantBlobs.push({ blobId: key, content });
           } else if (Array.isArray(content)) {
             // Content might be an array of content parts (like in OpenAI's format)
-            console.log(`[KV-BLOB]   ✓ Assistant content is array with ${content.length} parts`);
+            debugLog(`[KV-BLOB]   ✓ Assistant content is array with ${content.length} parts`);
             for (const part of content) {
               if (typeof part === 'string') {
                 this.pendingAssistantBlobs.push({ blobId: key, content: part });
               } else if (part?.type === 'text' && typeof part?.text === 'string') {
-                console.log(`[KV-BLOB]   ✓ Text part: ${part.text.slice(0, 100)}...`);
+                debugLog(`[KV-BLOB]   ✓ Text part: ${part.text.slice(0, 100)}...`);
                 this.pendingAssistantBlobs.push({ blobId: key, content: part.text });
               }
             }
           } else if (content === null || content === undefined) {
             // Content might be null for tool-calling responses
-            console.log(`[KV-BLOB]   Assistant content is null/undefined (likely tool-calling response)`);
+            debugLog(`[KV-BLOB]   Assistant content is null/undefined (likely tool-calling response)`);
           }
         }
         // Check for tool_calls in assistant messages
         if (blobAnalysis.json?.role === "assistant" && Array.isArray(blobAnalysis.json.tool_calls)) {
-          console.log(`[KV-BLOB]   Assistant has tool_calls: ${blobAnalysis.json.tool_calls.length}`);
+          debugLog(`[KV-BLOB]   Assistant has tool_calls: ${blobAnalysis.json.tool_calls.length}`);
         }
         // Check for "user" role with tool result
         if (blobAnalysis.json?.role === "user" && blobAnalysis.json?.content) {
-          console.log(`[KV-BLOB]   User message content (${String(blobAnalysis.json.content).length} chars): ${String(blobAnalysis.json.content).slice(0, 100)}...`);
+          debugLog(`[KV-BLOB]   User message content (${String(blobAnalysis.json.content).length} chars): ${String(blobAnalysis.json.content).slice(0, 100)}...`);
         }
         // Check for "tool" role
         if (blobAnalysis.json?.role === "tool") {
-          console.log(`[KV-BLOB]   Tool result for: ${blobAnalysis.json.tool_call_id}`);
+          debugLog(`[KV-BLOB]   Tool result for: ${blobAnalysis.json.tool_call_id}`);
         }
         // Also check for messages array pattern
         if (Array.isArray(blobAnalysis.json?.messages)) {
           for (const msg of blobAnalysis.json.messages) {
             if (msg?.role === "assistant" && typeof msg?.content === "string") {
-              console.log(`[KV-BLOB]   ✓ Assistant in messages array! (${msg.content.length} chars)`);
-              console.log(`[KV-BLOB]   Preview: ${msg.content.slice(0, 150)}...`);
+              debugLog(`[KV-BLOB]   ✓ Assistant in messages array! (${msg.content.length} chars)`);
+              debugLog(`[KV-BLOB]   Preview: ${msg.content.slice(0, 150)}...`);
               this.pendingAssistantBlobs.push({ blobId: key, content: msg.content });
             }
           }
         }
         // Check for content field directly (some formats)
         if (typeof blobAnalysis.json?.content === "string" && !blobAnalysis.json?.role) {
-          console.log(`[KV-BLOB]   Content field found (${blobAnalysis.json.content.length} chars)`);
-          console.log(`[KV-BLOB]   Preview: ${blobAnalysis.json.content.slice(0, 150)}...`);
+          debugLog(`[KV-BLOB]   Content field found (${blobAnalysis.json.content.length} chars)`);
+          debugLog(`[KV-BLOB]   Preview: ${blobAnalysis.json.content.slice(0, 150)}...`);
         }
       } else if (blobAnalysis.type === 'text') {
-        console.log(`[KV-BLOB]   Text preview: ${blobAnalysis.text?.slice(0, 200)}...`);
+        debugLog(`[KV-BLOB]   Text preview: ${blobAnalysis.text?.slice(0, 200)}...`);
         // Check if text looks like a model response (starts with text, not JSON/protobuf markers)
         if (blobAnalysis.text && !blobAnalysis.text.startsWith('{') && !blobAnalysis.text.startsWith('[') && blobAnalysis.text.length > 50) {
-          console.log(`[KV-BLOB]   Possible plain text response - check manually`);
+          debugLog(`[KV-BLOB]   Possible plain text response - check manually`);
         }
       } else if (blobAnalysis.type === 'protobuf') {
-        console.log(`[KV-BLOB]   Protobuf fields: ${blobAnalysis.protoFields?.map(f => `f${f.num}:w${f.wire}(${f.size}b)`).join(', ')}`);
+        debugLog(`[KV-BLOB]   Protobuf fields: ${blobAnalysis.protoFields?.map(f => `f${f.num}:w${f.wire}(${f.size}b)`).join(', ')}`);
         // Try to find text content within protobuf fields
         for (const field of blobAnalysis.protoFields || []) {
           if (field.text && field.text.length > 50) {
-            console.log(`[KV-BLOB]   field${field.num} text: ${field.text.slice(0, 100)}...`);
+            debugLog(`[KV-BLOB]   field${field.num} text: ${field.text.slice(0, 100)}...`);
             // Check if this might be assistant content
             if (!field.text.startsWith('{') && !field.text.startsWith('[')) {
-              console.log(`[KV-BLOB]   ✓ Possible assistant text in protobuf field ${field.num}`);
+              debugLog(`[KV-BLOB]   ✓ Possible assistant text in protobuf field ${field.num}`);
               // Store it for potential use
               this.pendingAssistantBlobs.push({ blobId: `${key}:f${field.num}`, content: field.text });
             }
           }
         }
       } else {
-        console.log(`[KV-BLOB]   Binary data (hex start): ${Buffer.from(kvMsg.blobData.slice(0, 32)).toString('hex')}`);
+        debugLog(`[KV-BLOB]   Binary data (hex start): ${Buffer.from(kvMsg.blobData.slice(0, 32)).toString('hex')}`);
       }
 
       // SetBlobResult: empty = no error
@@ -2252,7 +2256,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send tool result");
     }
 
-    console.log("[DEBUG] Sending tool result for exec id:", execRequest.id, "result:", result.success ? "success" : "error");
+    debugLog("[DEBUG] Sending tool result for exec id:", execRequest.id, "result:", result.success ? "success" : "error");
 
     // Build ExecClientMessage with mcp_result
     const execClientMsg = buildExecClientMessage(
@@ -2266,7 +2270,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, responseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Tool result sent, new seqno:", this.currentAppendSeqno);
+    debugLog("[DEBUG] Tool result sent, new seqno:", this.currentAppendSeqno);
 
     // Send stream close control message
     const controlMsg = buildExecClientControlMessage(execRequest.id);
@@ -2275,7 +2279,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", execRequest.id);
+    debugLog("[DEBUG] Stream close sent for exec id:", execRequest.id);
   }
 
   /**
@@ -2295,7 +2299,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send shell result");
     }
 
-    console.log("[DEBUG] Sending shell result for id:", id, "exitCode:", exitCode);
+    debugLog("[DEBUG] Sending shell result for id:", id, "exitCode:", exitCode);
 
     const execClientMsg = buildExecClientMessageWithShellResult(id, execId, command, cwd, stdout, stderr, exitCode, executionTimeMs);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
@@ -2310,7 +2314,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", id);
+    debugLog("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2321,7 +2325,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send ls result");
     }
 
-    console.log("[DEBUG] Sending ls result for id:", id);
+    debugLog("[DEBUG] Sending ls result for id:", id);
 
     const execClientMsg = buildExecClientMessageWithLsResult(id, execId, filesString);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
@@ -2336,7 +2340,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", id);
+    debugLog("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2347,7 +2351,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send request context result");
     }
 
-    console.log("[DEBUG] Sending request context result for id:", id);
+    debugLog("[DEBUG] Sending request context result for id:", id);
 
     const execClientMsg = buildExecClientMessageWithRequestContextResult(id, execId);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
@@ -2362,7 +2366,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", id);
+    debugLog("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2381,7 +2385,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send read result");
     }
 
-    console.log("[DEBUG] Sending read result for id:", id, "path:", path, "contentLength:", content.length);
+    debugLog("[DEBUG] Sending read result for id:", id, "path:", path, "contentLength:", content.length);
 
     const execClientMsg = buildExecClientMessageWithReadResult(id, execId, content, path, totalLines, fileSize, truncated);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
@@ -2396,7 +2400,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", id);
+    debugLog("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2413,7 +2417,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send grep result");
     }
 
-    console.log("[DEBUG] Sending grep result for id:", id, "pattern:", pattern, "files:", files.length);
+    debugLog("[DEBUG] Sending grep result for id:", id, "pattern:", pattern, "files:", files.length);
 
     const execClientMsg = buildExecClientMessageWithGrepResult(id, execId, pattern, path, files);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
@@ -2428,7 +2432,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", id);
+    debugLog("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2446,7 +2450,7 @@ export class AgentServiceClient {
       throw new Error("No active chat stream - cannot send write result");
     }
 
-    console.log("[DEBUG] Sending write result for id:", id, "result:", result.success ? "success" : "error");
+    debugLog("[DEBUG] Sending write result for id:", id, "result:", result.success ? "success" : "error");
 
     const execClientMsg = buildExecClientMessageWithWriteResult(id, execId, result);
     const responseMsg = buildAgentClientMessageWithExec(execClientMsg);
@@ -2461,7 +2465,7 @@ export class AgentServiceClient {
     await this.bidiAppend(this.currentRequestId, this.currentAppendSeqno, controlResponseMsg);
     this.currentAppendSeqno++;
 
-    console.log("[DEBUG] Stream close sent for exec id:", id);
+    debugLog("[DEBUG] Stream close sent for exec id:", id);
   }
 
   /**
@@ -2477,7 +2481,7 @@ export class AgentServiceClient {
   } {
     const fields = parseProtoFields(data);
     // Log all fields in InteractionUpdate for debugging
-    console.log("[DEBUG] InteractionUpdate fields:", fields.map(f => `field${f.fieldNumber}`).join(", "));
+    debugLog("[DEBUG] InteractionUpdate fields:", fields.map(f => `field${f.fieldNumber}`).join(", "));
 
     let text: string | null = null;
     let isComplete = false;
@@ -2498,7 +2502,7 @@ export class AgentServiceClient {
       }
       // field 2 = tool_call_started (ToolCallStartedUpdate)
       else if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
-        console.log("[DEBUG] Found tool_call_started (field 2)!");
+        debugLog("[DEBUG] Found tool_call_started (field 2)!");
         const parsed = parseToolCallStartedUpdate(field.value);
         if (parsed.toolCall) {
           toolCallStarted = {
@@ -2512,7 +2516,7 @@ export class AgentServiceClient {
       }
       // field 3 = tool_call_completed (ToolCallCompletedUpdate)
       else if (field.fieldNumber === 3 && field.wireType === 2 && field.value instanceof Uint8Array) {
-        console.log("[DEBUG] Found tool_call_completed (field 3)!");
+        debugLog("[DEBUG] Found tool_call_completed (field 3)!");
         const parsed = parseToolCallStartedUpdate(field.value); // Same structure as started
         if (parsed.toolCall) {
           toolCallCompleted = {
@@ -2526,7 +2530,7 @@ export class AgentServiceClient {
       }
       // field 7 = partial_tool_call (PartialToolCallUpdate)
       else if (field.fieldNumber === 7 && field.wireType === 2 && field.value instanceof Uint8Array) {
-        console.log("[DEBUG] Found partial_tool_call (field 7)!");
+        debugLog("[DEBUG] Found partial_tool_call (field 7)!");
         const parsed = parsePartialToolCallUpdate(field.value);
         partialToolCall = {
           callId: parsed.callId,
@@ -2544,7 +2548,7 @@ export class AgentServiceClient {
       }
       // field 14 = turn_ended (TurnEndedUpdate)
       else if (field.fieldNumber === 14) {
-        console.log("[DEBUG] Found turn_ended (field 14)!");
+        debugLog("[DEBUG] Found turn_ended (field 14)!");
         isComplete = true;
       }
       // field 13 = heartbeat
@@ -2611,7 +2615,7 @@ export class AgentServiceClient {
       const sseResponse = await ssePromise;
       const responseTime = Date.now() - startTime;
 
-      console.log(`[TIMING] Request sent: build=${buildTime}ms, append=${appendTime}ms, response=${responseTime}ms`);
+      debugLog(`[TIMING] Request sent: build=${buildTime}ms, append=${appendTime}ms, response=${responseTime}ms`);
 
       if (!sseResponse.ok) {
         clearTimeout(timeout);
@@ -2645,7 +2649,7 @@ export class AgentServiceClient {
           }
 
           if (!firstContentLogged) {
-            console.log(`[TIMING] First chunk received in ${Date.now() - startTime}ms`);
+            debugLog(`[TIMING] First chunk received in ${Date.now() - startTime}ms`);
             firstContentLogged = true;
           }
 
@@ -2672,7 +2676,7 @@ export class AgentServiceClient {
             // Check for trailer frame
             if ((flags ?? 0) & 0x80) {
               const trailer = new TextDecoder().decode(frameData);
-              console.log("Received trailer frame:", trailer.slice(0, 200));
+              debugLog("Received trailer frame:", trailer.slice(0, 200));
               if (trailer.includes("grpc-status:") && !trailer.includes("grpc-status: 0")) {
                 const match = trailer.match(/grpc-message:\s*([^\r\n]+)/);
                 const errorMsg = decodeURIComponent(match?.[1] ?? "Unknown gRPC error");
@@ -2684,13 +2688,13 @@ export class AgentServiceClient {
 
             // Parse AgentServerMessage
             const serverMsgFields = parseProtoFields(frameData);
-            console.log("[DEBUG] Server message fields:", serverMsgFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
+            debugLog("[DEBUG] Server message fields:", serverMsgFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
 
             for (const field of serverMsgFields) {
               try {
                 // field 1 = interaction_update
                 if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                  console.log("[DEBUG] Received interaction_update, length:", field.value.length);
+                  debugLog("[DEBUG] Received interaction_update, length:", field.value.length);
                   const parsed = this.parseInteractionUpdate(field.value);
 
                   // Yield text content
@@ -2771,16 +2775,16 @@ export class AgentServiceClient {
                 // NOTE: Checkpoint does NOT mean we're done! exec_server_message can come AFTER checkpoint.
                 // Only end on turn_ended (field 14 in interaction_update) or stream close.
                 if (field.fieldNumber === 3 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                  console.log("[DEBUG] Received checkpoint, data length:", field.value.length);
+                  debugLog("[DEBUG] Received checkpoint, data length:", field.value.length);
                   // Try to parse checkpoint to see what it contains
                   const checkpointFields = parseProtoFields(field.value);
-                  console.log("[DEBUG] Checkpoint fields:", checkpointFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
+                  debugLog("[DEBUG] Checkpoint fields:", checkpointFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
                   for (const cf of checkpointFields) {
                     if (cf.wireType === 2 && cf.value instanceof Uint8Array) {
                       try {
                         const text = new TextDecoder().decode(cf.value);
                         if (text.length < 200) {
-                          console.log(`[DEBUG] Checkpoint field ${cf.fieldNumber}: ${text}`);
+                          debugLog(`[DEBUG] Checkpoint field ${cf.fieldNumber}: ${text}`);
                         }
                       } catch {}
                     }
@@ -2792,7 +2796,7 @@ export class AgentServiceClient {
 
                 // field 2 = exec_server_message (tool execution request)
                 if (field.fieldNumber === 2 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                  console.log("[DEBUG] Received exec_server_message (field 2), length:", field.value.length);
+                  debugLog("[DEBUG] Received exec_server_message (field 2), length:", field.value.length);
 
                   // Parse the ExecServerMessage
                   const execRequest = parseExecServerMessage(field.value);
@@ -2800,7 +2804,7 @@ export class AgentServiceClient {
                   if (execRequest) {
                     // Log based on type
                     if (execRequest.type === 'mcp') {
-                      console.log("[DEBUG] Parsed MCP exec request:", {
+                      debugLog("[DEBUG] Parsed MCP exec request:", {
                         id: execRequest.id,
                         name: execRequest.name,
                         toolName: execRequest.toolName,
@@ -2809,7 +2813,7 @@ export class AgentServiceClient {
                         args: execRequest.args,
                       });
                     } else {
-                      console.log(`[DEBUG] Parsed ${execRequest.type} exec request:`, execRequest);
+                      debugLog(`[DEBUG] Parsed ${execRequest.type} exec request:`, execRequest);
                     }
 
                     // Yield exec_request chunk for the server to handle
@@ -2821,34 +2825,34 @@ export class AgentServiceClient {
                   } else {
                     // Log other exec types we don't handle yet
                     const execFields = parseProtoFields(field.value);
-                    console.log("[DEBUG] exec_server_message fields (unhandled):", execFields.map(f => `field${f.fieldNumber}`).join(", "));
+                    debugLog("[DEBUG] exec_server_message fields (unhandled):", execFields.map(f => `field${f.fieldNumber}`).join(", "));
                   }
                 }
 
                 // field 4 = kv_server_message
                 if (field.fieldNumber === 4 && field.wireType === 2 && field.value instanceof Uint8Array) {
                   const kvMsg = parseKvServerMessage(field.value);
-                  console.log(`[DEBUG] KV message: id=${kvMsg.id}, type=${kvMsg.messageType}, blobId=${kvMsg.blobId ? Buffer.from(kvMsg.blobId).toString('hex').slice(0, 20) : 'none'}...`);
+                  debugLog(`[DEBUG] KV message: id=${kvMsg.id}, type=${kvMsg.messageType}, blobId=${kvMsg.blobId ? Buffer.from(kvMsg.blobId).toString('hex').slice(0, 20) : 'none'}...`);
                   appendSeqno = await this.handleKvMessage(kvMsg, requestId, appendSeqno);
                   this.currentAppendSeqno = appendSeqno;
                 }
 
                 // field 5 = exec_server_control_message (abort signal from server)
                 if (field.fieldNumber === 5 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                  console.log("[DEBUG] Received exec_server_control_message (field 5)!");
+                  debugLog("[DEBUG] Received exec_server_control_message (field 5)!");
                   const controlFields = parseProtoFields(field.value);
-                  console.log("[DEBUG] exec_server_control_message fields:", controlFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
+                  debugLog("[DEBUG] exec_server_control_message fields:", controlFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
                   
                   // ExecServerControlMessage has field 1 = abort (ExecServerAbort)
                   for (const cf of controlFields) {
                     if (cf.fieldNumber === 1 && cf.wireType === 2 && cf.value instanceof Uint8Array) {
-                      console.log("[DEBUG] Server sent abort signal!");
+                      debugLog("[DEBUG] Server sent abort signal!");
                       // Parse ExecServerAbort - it has field 1 = id (string)
                       const abortFields = parseProtoFields(cf.value);
                       for (const af of abortFields) {
                         if (af.fieldNumber === 1 && af.wireType === 2 && af.value instanceof Uint8Array) {
                           const abortId = new TextDecoder().decode(af.value);
-                          console.log("[DEBUG] Abort id:", abortId);
+                          debugLog("[DEBUG] Abort id:", abortId);
                         }
                       }
                       yield { type: "exec_server_abort" };
@@ -2859,9 +2863,9 @@ export class AgentServiceClient {
 
                 // field 7 = interaction_query (server asking for user approval/input)
                 if (field.fieldNumber === 7 && field.wireType === 2 && field.value instanceof Uint8Array) {
-                  console.log("[DEBUG] Received interaction_query (field 7)!");
+                  debugLog("[DEBUG] Received interaction_query (field 7)!");
                   const queryFields = parseProtoFields(field.value);
-                  console.log("[DEBUG] interaction_query fields:", queryFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
+                  debugLog("[DEBUG] interaction_query fields:", queryFields.map(f => `field${f.fieldNumber}:${f.wireType}`).join(", "));
                   
                   // InteractionQuery structure:
                   // field 1 = id (uint32)
@@ -2889,7 +2893,7 @@ export class AgentServiceClient {
                     }
                   }
                   
-                  console.log(`[DEBUG] InteractionQuery: id=${queryId}, type=${queryType}`);
+                  debugLog(`[DEBUG] InteractionQuery: id=${queryId}, type=${queryType}`);
                   
                   // Yield the interaction query for the server to handle
                   yield {
@@ -2920,7 +2924,7 @@ export class AgentServiceClient {
           // Session reuse: If no text was streamed but we have pending assistant blobs,
           // emit them as kv_blob_assistant chunks so the server can use the content
           if (!hasStreamedText && this.pendingAssistantBlobs.length > 0) {
-            console.log(`[DEBUG] No streamed text but found ${this.pendingAssistantBlobs.length} assistant blob(s) - emitting`);
+            debugLog(`[DEBUG] No streamed text but found ${this.pendingAssistantBlobs.length} assistant blob(s) - emitting`);
             for (const blob of this.pendingAssistantBlobs) {
               yield { type: "kv_blob_assistant", blobContent: blob.content };
             }
