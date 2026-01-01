@@ -26,9 +26,24 @@ export interface OpenAITool {
 
 // --- Message Types ---
 
+export interface OpenAITextContentPart {
+  type: "text";
+  text: string;
+}
+
+export interface OpenAIImageContentPart {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "auto" | "low" | "high";
+  };
+}
+
+export type OpenAIMessageContent = string | null | (OpenAITextContentPart | OpenAIImageContentPart)[];
+
 export interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: OpenAIMessageContent;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
 }

@@ -6,13 +6,23 @@
 
 import { randomUUID } from "node:crypto";
 import type { ExecRequest } from "../api/agent-service";
-import type { OpenAIMessage, OpenAIStreamChunk } from "./types";
+import type { OpenAIMessage, OpenAIMessageContent, OpenAIStreamChunk } from "./types";
 
 /**
  * Generate a unique completion ID
  */
 export function generateCompletionId(): string {
   return `chatcmpl-${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function extractTextContent(content: OpenAIMessageContent): string {
+  if (content === null) return "";
+  if (typeof content === "string") return content;
+  
+  return content
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map(part => part.text)
+    .join("\n");
 }
 
 /**
@@ -32,7 +42,7 @@ export function messagesToPrompt(messages: OpenAIMessage[]): string {
   // Extract system messages to prepend
   const systemMessages = messages.filter(m => m.role === "system");
   if (systemMessages.length > 0) {
-    parts.push(systemMessages.map(m => m.content ?? "").join("\n"));
+    parts.push(systemMessages.map(m => extractTextContent(m.content)).join("\n"));
   }
   
   // Process non-system messages in order
@@ -44,24 +54,28 @@ export function messagesToPrompt(messages: OpenAIMessage[]): string {
   // Format the full conversation history
   for (const msg of conversationMessages) {
     if (msg.role === "user") {
-      parts.push(`User: ${msg.content ?? ""}`);
+      parts.push(`User: ${extractTextContent(msg.content)}`);
     } else if (msg.role === "assistant") {
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         // Assistant made tool calls - show what was called
         const toolCallsDesc = msg.tool_calls.map(tc => 
           `[Called tool: ${tc.function.name}(${tc.function.arguments})]`
         ).join("\n");
-        if (msg.content) {
-          parts.push(`Assistant: ${msg.content}\n${toolCallsDesc}`);
+        const textContent = extractTextContent(msg.content);
+        if (textContent) {
+          parts.push(`Assistant: ${textContent}\n${toolCallsDesc}`);
         } else {
           parts.push(`Assistant: ${toolCallsDesc}`);
         }
-      } else if (msg.content) {
-        parts.push(`Assistant: ${msg.content}`);
+      } else {
+        const textContent = extractTextContent(msg.content);
+        if (textContent) {
+          parts.push(`Assistant: ${textContent}`);
+        }
       }
     } else if (msg.role === "tool") {
       // Tool result - show the result with the tool call ID for context
-      parts.push(`[Tool result for ${msg.tool_call_id}]: ${msg.content ?? ""}`);
+      parts.push(`[Tool result for ${msg.tool_call_id}]: ${extractTextContent(msg.content)}`);
     }
   }
   
