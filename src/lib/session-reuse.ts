@@ -8,14 +8,14 @@ export interface OpenAIToolCallLite {
 
 export interface OpenAIMessageLite {
   role: "system" | "user" | "assistant" | "tool";
-  content: any;
+  content: unknown;
   tool_calls?: OpenAIToolCallLite[];
   tool_call_id?: string;
 }
 
 export interface SessionLike {
   id: string;
-  iterator: AsyncIterator<any>;
+  iterator: AsyncIterator<unknown>;
   pendingExecs: Map<string, ExecRequest>;
   createdAt: number;
   lastActivity: number;
@@ -27,6 +27,7 @@ export interface SessionLike {
     sendLsResult: SessionClient["sendLsResult"];
     sendGrepResult: SessionClient["sendGrepResult"];
     sendWriteResult: SessionClient["sendWriteResult"];
+    sendResumeAction?: SessionClient["sendResumeAction"];
   };
 }
 
@@ -70,6 +71,7 @@ export interface SessionClient {
       error?: { path: string; error: string };
     }
   ) => Promise<void>;
+  sendResumeAction?: () => Promise<void>;
 }
 
 export function createSessionId(): string {
@@ -138,10 +140,10 @@ export function selectCallBase(execReq: ExecRequest): string {
 
 export function mapExecRequestToTool(execReq: ExecRequest): {
   toolName: string | null;
-  toolArgs: Record<string, any> | null;
+  toolArgs: Record<string, unknown> | null;
 } {
   if (execReq.type === "shell") {
-    const toolArgs: Record<string, any> = { command: execReq.command };
+    const toolArgs: Record<string, unknown> = { command: execReq.command };
     if (execReq.cwd) toolArgs.cwd = execReq.cwd;
     return { toolName: "bash", toolArgs };
   }
@@ -167,9 +169,9 @@ export function mapExecRequestToTool(execReq: ExecRequest): {
   return { toolName: null, toolArgs: null };
 }
 
-export function safeParseJson(input: string): Record<string, any> | null {
+export function safeParseJson(input: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(input);
+    return JSON.parse(input) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -233,22 +235,31 @@ export async function sendToolResultsToCursor(
         const path = execReq.path ?? process.cwd();
         await session.client.sendGrepResult(execReq.id, execReq.execId, pattern, path, files);
       } else if (execReq.type === "write") {
-        // Parse write result from tool response
         const parsed = safeParseJson(content);
-        if (parsed && parsed.error) {
+        const parsedError = parsed?.error;
+
+        if (typeof parsedError === "string" && parsedError.length > 0) {
           await session.client.sendWriteResult(execReq.id, execReq.execId, {
-            error: { path: execReq.path, error: parsed.error }
+            error: { path: execReq.path, error: parsedError },
           });
         } else {
-          const linesCreated = parsed?.linesCreated ?? content.split("\n").length;
-          const fileSize = parsed?.fileSize ?? content.length;
+          const linesCreatedValue = parsed?.linesCreated;
+          const fileSizeValue = parsed?.fileSize;
+          const fileContentAfterWriteValue = parsed?.fileContentAfterWrite;
+
+          const linesCreated =
+            typeof linesCreatedValue === "number" ? linesCreatedValue : content.split("\n").length;
+          const fileSize = typeof fileSizeValue === "number" ? fileSizeValue : content.length;
+          const fileContentAfterWrite =
+            typeof fileContentAfterWriteValue === "string" ? fileContentAfterWriteValue : undefined;
+
           await session.client.sendWriteResult(execReq.id, execReq.execId, {
-            success: { 
-              path: execReq.path, 
-              linesCreated, 
+            success: {
+              path: execReq.path,
+              linesCreated,
               fileSize,
-              fileContentAfterWrite: parsed?.fileContentAfterWrite
-            }
+              fileContentAfterWrite,
+            },
           });
         }
       } else {
@@ -266,22 +277,26 @@ export async function sendToolResultsToCursor(
   if (processedAny) {
     session.state = "running";
     session.lastActivity = Date.now();
+
+    try {
+      await session.client.sendResumeAction?.();
+    } catch (err) {
+      console.warn(`[Session ${session.id}] Failed to send ResumeAction:`, err);
+    }
   }
 
   return processedAny;
 }
 
 export async function cleanupExpiredSessions(
-  sessionMap: Map<string, { iterator?: AsyncIterator<any>; lastActivity: number }>,
+  sessionMap: Map<string, { iterator?: AsyncIterator<unknown>; lastActivity: number }>,
   timeoutMs: number,
   now: number = Date.now()
 ): Promise<void> {
   for (const [sessionId, session] of sessionMap) {
     if (now - session.lastActivity > timeoutMs) {
       try {
-        if (session.iterator && typeof session.iterator.return === "function") {
-          await session.iterator.return(undefined as any);
-        }
+        await session.iterator?.return?.();
       } catch (err) {
         console.warn(`[Session ${sessionId}] Failed to close expired iterator:`, err);
       } finally {

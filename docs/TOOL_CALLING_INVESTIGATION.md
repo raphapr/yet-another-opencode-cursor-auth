@@ -90,14 +90,20 @@ Both requests include `tools`. The model decides whether to call more tools or r
 ## KV Blob Investigation (December 10, 2025)
 
 ### Background
-After sending tool results via BidiAppend, Cursor streams only heartbeats and stores model responses in KV blobs instead of streaming `text_delta`/`token_delta`. This investigation analyzed the blob contents to understand what's being stored.
+After implementing ResumeAction (January 2026), session reuse now works correctly. The previous issue where Cursor stored model responses in KV blobs instead of streaming has been resolved.
 
 ### Test Setup
 ```bash
-# Start server with session reuse enabled and enhanced blob logging
-CURSOR_SESSION_REUSE=1 bun run src/server.ts > server.log 2>&1
+# Session reuse is now the default behavior
+bun run src/server.ts
 
-# Run investigation script
+# With debug logging
+CURSOR_DEBUG=1 bun run src/server.ts
+
+# To disable session reuse (for comparison/debugging)
+CURSOR_SESSION_REUSE=0 bun run src/server.ts
+
+# Run investigation script (for debugging only)
 bun run scripts/investigate-kv-blobs.ts
 ```
 

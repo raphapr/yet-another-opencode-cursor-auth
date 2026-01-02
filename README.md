@@ -237,6 +237,7 @@ for await (const chunk of response) {
 | `PORT` | Server port | `18741` |
 | `CURSOR_ACCESS_TOKEN` | Direct access token | - |
 | `CURSOR_DEBUG` | Enable debug logging | `0` |
+| `CURSOR_SESSION_REUSE` | Session reuse for tool calls | `1` (enabled) |
 
 ---
 
@@ -268,9 +269,8 @@ opencode-cursor-auth/
 
 ## Known Limitations
 
-1. **Session Reuse**: Each request creates a fresh session (session reuse is experimental and disabled).
-2. **Non-streaming Tool Results**: Tool results are sent in new requests with full conversation history.
-3. **Usage Metrics**: Token usage is estimated, not exact.
+1. **Usage Metrics**: Token usage is estimated, not exact.
+2. **Session Reuse**: Enabled by default. Set `CURSOR_SESSION_REUSE=0` to disable if you encounter issues.
 
 ## Development
 

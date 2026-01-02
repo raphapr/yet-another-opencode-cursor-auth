@@ -36,6 +36,16 @@ import {
 } from "./utils";
 import { calculateTokenUsage } from "../utils/tokenizer";
 import type { CursorModelInfo } from "../api/cursor-models";
+import {
+  cleanupExpiredSessions,
+  collectToolMessages,
+  createSessionId,
+  findSessionIdInMessages,
+  makeToolCallId,
+  selectCallBase,
+  sendToolResultsToCursor,
+  type SessionLike,
+} from "../session-reuse";
 
 // --- Model Cache ---
 interface ModelCache {
@@ -44,6 +54,13 @@ interface ModelCache {
 }
 const modelCache: ModelCache = { models: null, time: 0 };
 const MODEL_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+const SESSION_REUSE_TIMEOUT_MS = 15 * 60 * 1000;
+const sessionMap = new Map<string, SessionLike>();
+
+function sessionReuseEnabled(): boolean {
+  return process.env.CURSOR_SESSION_REUSE !== "0";
+}
 
 /**
  * Get cached models or fetch fresh ones
@@ -209,6 +226,7 @@ async function handleChatCompletions(
       model,
       tools,
       toolsProvided: toolsProvided ?? false,
+      messages: body.messages,
       completionId,
       created,
       log,
@@ -252,13 +270,28 @@ interface StreamParams {
   model: string;
   tools: OpenAIToolDefinition[] | undefined;
   toolsProvided: boolean;
+  messages: OpenAIMessage[];
   completionId: string;
   created: number;
   log: (message: string, ...args: unknown[]) => void;
 }
 
 async function streamChatCompletion(params: StreamParams): Promise<Response> {
-  const { client, prompt, model, tools, toolsProvided, completionId, created, log } = params;
+  const { client, prompt, model, tools, toolsProvided, messages, completionId, created, log } = params;
+
+  if (toolsProvided && sessionReuseEnabled()) {
+    return streamChatCompletionWithSessionReuse({
+      client,
+      prompt,
+      model,
+      tools,
+      toolsProvided,
+      messages,
+      completionId,
+      created,
+      log,
+    });
+  }
   
   const encoder = new TextEncoder();
   let isClosed = false;
@@ -406,6 +439,295 @@ async function streamChatCompletion(params: StreamParams): Promise<Response> {
             controller.error(err);
           } catch {
             // Controller may already be closed
+          }
+        }
+      }
+    },
+    cancel() {
+      isClosed = true;
+    },
+  });
+
+  return makeStreamResponse(readable);
+}
+
+async function streamChatCompletionWithSessionReuse(params: StreamParams): Promise<Response> {
+  const { client, prompt, model, tools, messages, completionId, created, log } = params;
+
+  await cleanupExpiredSessions(
+    sessionMap as unknown as Map<string, { iterator?: AsyncIterator<unknown>; lastActivity: number }>,
+    SESSION_REUSE_TIMEOUT_MS
+  );
+
+  const encoder = new TextEncoder();
+  let isClosed = false;
+  let mcpToolCallIndex = 0;
+  let pendingEditToolCall: string | null = null;
+  let accumulatedContent = "";
+
+  const existingSessionId = findSessionIdInMessages(messages);
+  const toolMessages = collectToolMessages(messages);
+
+  let sessionId = existingSessionId ?? createSessionId();
+  let session = existingSessionId ? sessionMap.get(existingSessionId) : undefined;
+
+  if (!session) {
+    const iterator = client
+      .chatStream({ message: prompt, model, mode: AgentMode.AGENT, tools })
+      [Symbol.asyncIterator]();
+
+    session = {
+      id: sessionId,
+      iterator,
+      pendingExecs: new Map(),
+      createdAt: Date.now(),
+      lastActivity: Date.now(),
+      state: "running",
+      client: {
+        sendToolResult: client.sendToolResult.bind(client),
+        sendShellResult: client.sendShellResult.bind(client),
+        sendReadResult: client.sendReadResult.bind(client),
+        sendLsResult: client.sendLsResult.bind(client),
+        sendGrepResult: client.sendGrepResult.bind(client),
+        sendWriteResult: client.sendWriteResult.bind(client),
+        sendResumeAction: client.sendResumeAction.bind(client),
+      },
+    };
+
+    sessionMap.set(sessionId, session);
+  } else {
+    sessionId = session.id;
+  }
+
+  session.lastActivity = Date.now();
+
+  const readable = new ReadableStream({
+    async start(controller) {
+      try {
+        controller.enqueue(
+          encoder.encode(createSSEChunk(createStreamChunk(completionId, model, created, { role: "assistant" })))
+        );
+
+        if (toolMessages.length > 0) {
+          const processed = await sendToolResultsToCursor(session, toolMessages);
+          if (!processed) {
+            log(
+              `[OpenAI Compat] No pending execs matched for session ${sessionId}; restarting with fresh request body`
+            );
+
+            try {
+              await session.iterator.return?.();
+            } catch (err: unknown) {
+              log("[OpenAI Compat] Failed to close prior session iterator:", err);
+            }
+
+            const iterator = client
+              .chatStream({ message: prompt, model, mode: AgentMode.AGENT, tools })
+              [Symbol.asyncIterator]();
+
+            session.iterator = iterator;
+            session.pendingExecs.clear();
+            session.state = "running";
+          }
+        }
+
+        while (!isClosed) {
+          const { done, value } = await session.iterator.next();
+
+          if (done) {
+            sessionMap.delete(sessionId);
+            const usage = calculateTokenUsage(prompt, accumulatedContent, model);
+            const finalChunk: OpenAIStreamChunk = {
+              id: completionId,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: "stop",
+                },
+              ],
+              usage,
+            };
+
+            controller.enqueue(encoder.encode(createSSEChunk(finalChunk)));
+            controller.enqueue(encoder.encode(createSSEDone()));
+            controller.close();
+            return;
+          }
+
+          const chunk = value as {
+            type: string;
+            content?: string;
+            blobContent?: string;
+            toolCall?: { name?: string; callId: string };
+            execRequest?: ExecRequest;
+            error?: string;
+          };
+
+          if (chunk.type === "text" || chunk.type === "token") {
+            if (chunk.content) {
+              accumulatedContent += chunk.content;
+              session.lastActivity = Date.now();
+              controller.enqueue(
+                encoder.encode(
+                  createSSEChunk(createStreamChunk(completionId, model, created, { content: chunk.content }))
+                )
+              );
+            }
+            continue;
+          }
+
+          if (chunk.type === "kv_blob_assistant" && chunk.blobContent) {
+            accumulatedContent += chunk.blobContent;
+            session.lastActivity = Date.now();
+            controller.enqueue(
+              encoder.encode(
+                createSSEChunk(createStreamChunk(completionId, model, created, { content: chunk.blobContent }))
+              )
+            );
+            continue;
+          }
+
+          if (chunk.type === "tool_call_started" && chunk.toolCall) {
+            if (chunk.toolCall.name === "edit" || chunk.toolCall.name === "apply_diff") {
+              pendingEditToolCall = chunk.toolCall.callId;
+            }
+            continue;
+          }
+
+          if (chunk.type === "exec_request" && chunk.execRequest) {
+            const execReq = chunk.execRequest;
+
+            if (execReq.type === "request_context") {
+              continue;
+            }
+
+            if (execReq.type === "read" && pendingEditToolCall) {
+              try {
+                const file = Bun.file(execReq.path);
+                const content = await file.text();
+                const stats = await file.stat();
+                const totalLines = content.split("\n").length;
+                await client.sendReadResult(
+                  execReq.id,
+                  execReq.execId,
+                  content,
+                  execReq.path,
+                  totalLines,
+                  BigInt(stats.size),
+                  false
+                );
+              } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : "Unknown error";
+                await client.sendReadResult(execReq.id, execReq.execId, `Error: ${message}`, execReq.path, 0, 0n, false);
+              }
+
+              try {
+                await client.sendResumeAction();
+              } catch (err: unknown) {
+                log("[OpenAI Compat] Failed to send ResumeAction:", err);
+              }
+
+              continue;
+            }
+
+            const { toolName, toolArgs } = mapExecRequestToTool(execReq);
+            if (toolName && toolArgs) {
+              const currentIndex = mcpToolCallIndex++;
+              const toolCallId = makeToolCallId(sessionId, selectCallBase(execReq));
+              session.pendingExecs.set(toolCallId, execReq);
+              session.state = "waiting_tool";
+              session.lastActivity = Date.now();
+
+              const toolCallChunk: OpenAIStreamChunk = {
+                id: completionId,
+                object: "chat.completion.chunk",
+                created,
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: currentIndex,
+                          id: toolCallId,
+                          type: "function",
+                          function: {
+                            name: toolName,
+                            arguments: JSON.stringify(toolArgs),
+                          },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              };
+
+              controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
+              controller.enqueue(
+                encoder.encode(createSSEChunk(createStreamChunk(completionId, model, created, {}, "tool_calls")))
+              );
+              controller.enqueue(encoder.encode(createSSEDone()));
+
+              isClosed = true;
+              controller.close();
+              return;
+            }
+
+            await executeBuiltinTool(client, execReq, log);
+            continue;
+          }
+
+          if (chunk.type === "error") {
+            sessionMap.delete(sessionId);
+            controller.enqueue(
+              encoder.encode(
+                createSSEChunk({
+                  error: { message: chunk.error ?? "Unknown error", type: "server_error" },
+                })
+              )
+            );
+            controller.enqueue(encoder.encode(createSSEDone()));
+            controller.close();
+            return;
+          }
+
+          if (chunk.type === "done") {
+            sessionMap.delete(sessionId);
+            break;
+          }
+        }
+
+        const usage = calculateTokenUsage(prompt, accumulatedContent, model);
+        const finalChunk: OpenAIStreamChunk = {
+          id: completionId,
+          object: "chat.completion.chunk",
+          created,
+          model,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: "stop",
+            },
+          ],
+          usage,
+        };
+
+        controller.enqueue(encoder.encode(createSSEChunk(finalChunk)));
+        controller.enqueue(encoder.encode(createSSEDone()));
+        controller.close();
+      } catch (err: unknown) {
+        if (!isClosed) {
+          try {
+            controller.error(err);
+          } catch (innerErr: unknown) {
+            log("[OpenAI Compat] Failed to signal stream error:", innerErr);
           }
         }
       }

@@ -1,26 +1,31 @@
 # Session Reuse Implementation Guide
 
 **Date**: January 1, 2026  
-**Status**: In Progress - ResumeAction encoding implemented
+**Status**: Completed - Session reuse is now the default behavior
 
 ## Overview
 
-This document outlines how to implement session reuse for the Cursor proxy, based on analysis of the Cursor CLI source code. Session reuse would allow tool results to be sent back to an existing Cursor session via `BidiAppend` instead of creating a new session for each request.
+This document outlines how session reuse is implemented in the Cursor proxy. Session reuse allows tool results to be sent back to an existing Cursor session via `BidiAppend` instead of creating a new session for each request.
 
 ## Current State
 
-### What Works (Fresh Sessions)
+### How It Works (Default Behavior)
+- Tool results are sent via `BidiAppend` to continue the existing session
+- After sending tool results, `ResumeAction` is sent to signal the server to continue streaming
+- The server resumes streaming text instead of storing responses in KV blobs
+- **Advantage**: More efficient, maintains conversation context natively
+
+### Disabling Session Reuse
+To disable session reuse and fall back to fresh sessions per request:
+```bash
+CURSOR_SESSION_REUSE=0 bun run src/server.ts
+```
+
+When disabled:
 - Each OpenCode request creates a new Cursor session
 - Full conversation history is sent in every request
 - Tool calls are emitted as OpenAI `tool_calls`, OpenCode executes them locally
 - Follow-up requests include tool results in message history
-- **Advantage**: Simple, reliable, matches standard OpenAI client behavior
-
-### What Doesn't Work (Session Reuse)
-- When tool results are sent via `BidiAppend` to continue a session, Cursor stores the model's response in **KV blobs** instead of streaming
-- The stream only emits heartbeats after tool completion
-- Text response is stored in blob, `turn_ended` never arrives via stream
-- **Root cause**: Missing `ResumeAction` after tool result submission
 
 ## Recent Progress (January 2026)
 
@@ -330,18 +335,14 @@ Hypothesis: The Cursor server may use different response modes based on:
 
 ## Testing Strategy
 
-1. **Enable flag**: `CURSOR_SESSION_REUSE=1 bun run src/server.ts`
-2. **Make request with tools**: Should get `tool_calls`, session stays open
-3. **Send tool result**: Via session continuation (BidiAppend)
-4. **Send ResumeAction**: After tool result, call `client.sendResumeAction()`
-5. **Observe**: Does text stream instead of going to KV blob?
-6. **Extract if needed**: If KV blob, extract and emit
+1. **Default (session reuse enabled)**: `bun run src/server.ts`
+2. **With debug logging**: `CURSOR_DEBUG=1 bun run src/server.ts`
+3. **Disable session reuse**: `CURSOR_SESSION_REUSE=0 bun run src/server.ts`
 
 ## Next Steps
 
-1. **Integration**: Update the session reuse code path in `src/server.ts` or OpenCode handler to call `sendResumeAction()` after each tool result
-2. **Test with live API**: Run `CURSOR_SESSION_REUSE=1` and verify streaming resumes after ResumeAction
-3. **Handle edge cases**: Multiple tool calls in sequence, timeouts, connection loss
+- Monitor for any edge cases with complex multi-tool workflows
+- Consider adding metrics for session reuse vs fresh session performance
 
 ## References
 
