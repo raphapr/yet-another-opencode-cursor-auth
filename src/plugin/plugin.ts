@@ -230,68 +230,63 @@ export const CursorOAuthPlugin = async ({
               m.displayModelId?.includes("thinking") ||
               m.displayName?.toLowerCase().includes("thinking");
 
-            // Register model under all its identifiers
-            const ids = [
-              m.modelId,
-              m.displayModelId,
-              ...(m.aliases ?? []),
-            ].filter((id): id is string => !!id);
+            // Use displayModelId as the primary ID (user-facing), fall back to modelId
+            const modelID = m.displayModelId || m.modelId;
+            if (!modelID) continue;
 
-            for (const modelID of ids) {
-              const existingModel = provider.models[modelID];
-              
-              // Build model in OpenCode's exact internal format (see provider.ts lines 547-593)
-              const parsedModel = {
+            const existingModel = provider.models[modelID];
+            
+            // Build model in OpenCode's exact internal format (see provider.ts lines 547-593)
+            const parsedModel = {
+              id: modelID,
+              api: {
                 id: modelID,
-                api: {
-                  id: modelID,
-                  npm: "@ai-sdk/openai-compatible",
-                  url: undefined, // Will use baseURL from loader result
+                npm: "@ai-sdk/openai-compatible",
+                url: undefined, // Will use baseURL from loader result
+              },
+              status: "active" as const,
+              name: m.displayName || m.displayNameShort || modelID,
+              providerID: CURSOR_PROVIDER_ID,
+              capabilities: {
+                temperature: true,
+                reasoning: isThinking,
+                attachment: true,
+                toolcall: true,
+                input: {
+                  text: true,
+                  audio: false,
+                  image: true,
+                  video: false,
+                  pdf: false,
                 },
-                status: "active" as const,
-                name: m.displayName || m.displayNameShort || modelID,
-                providerID: CURSOR_PROVIDER_ID,
-                capabilities: {
-                  temperature: true,
-                  reasoning: isThinking,
-                  attachment: true,
-                  toolcall: true,
-                  input: {
-                    text: true,
-                    audio: false,
-                    image: true,
-                    video: false,
-                    pdf: false,
-                  },
-                  output: {
-                    text: true,
-                    audio: false,
-                    image: false,
-                    video: false,
-                    pdf: false,
-                  },
-                  interleaved: false,
+                output: {
+                  text: true,
+                  audio: false,
+                  image: false,
+                  video: false,
+                  pdf: false,
                 },
-                cost: {
-                  input: 0,
-                  output: 0,
-                  cache: {
-                    read: 0,
-                    write: 0,
-                  },
+                interleaved: false,
+              },
+              cost: {
+                input: 0,
+                output: 0,
+                cache: {
+                  read: 0,
+                  write: 0,
                 },
-                options: {},
-                limit: {
-                  context: 128000,
-                  output: 16384,
-                },
-                headers: {},
-                // Preserve any existing config overrides
-                ...existingModel,
-              };
-              
-              provider.models[modelID] = parsedModel;
-            }
+              },
+              options: {},
+              limit: {
+                context: 128000,
+                output: 16384,
+              },
+              headers: {},
+              // Preserve any existing config overrides
+              ...existingModel,
+            };
+            
+            provider.models[modelID] = parsedModel;
           }
         }
       } catch (error) {
