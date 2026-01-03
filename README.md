@@ -2,25 +2,22 @@
 
 > **⚠️ Experimental Project - Use at Your Own Risk**
 >
-> This is a highly experimental project with limited support. It was built by reverse-engineering Cursor's internal API, which means:
+> This is a highly experimental project with limited support. It integrates with Cursor services via an unofficial interface, which means:
 >
-> - **It may break at any time** without notice if Cursor changes their API
+> - **It may break at any time** without notice if Cursor changes their services
 > - **No guarantees** of stability, compatibility, or continued functionality
 > - **"It Works On My Machine™"** - your mileage may vary
 > - **Not affiliated with or endorsed by Cursor** - this is an unofficial community project
 >
-> If it stops working, feel free to open an issue, but fixes depend on community contributions and reverse-engineering efforts.
+> If it stops working, feel free to open an issue, but fixes depend on community contributions and ongoing compatibility work.
 
 > **⚖️ Legal Disclaimer**
 >
-> This project may violate [Cursor's Terms of Service](https://www.cursor.com/terms-of-service), specifically:
-> - **Section 1.5(i)**: Prohibits reverse engineering or deriving the underlying structure of the Service
-> - **Section 1.5(viii)**: Prohibits extracting data from the Service
+> This project may violate [Cursor's Terms of Service](https://www.cursor.com/terms-of-service).
 >
 > **Potential consequences include:**
 > - Your Cursor account being suspended or terminated
 > - Loss of access to Cursor services
-> - Possible legal action (cease & desist, etc.)
 >
 > **By using this project, you acknowledge these risks and accept full responsibility.** This project is provided for educational and research purposes. The authors are not responsible for any consequences of using this software.
 
@@ -304,6 +301,6 @@ MIT
 
 ## Acknowledgments
 
-- Built by reverse-engineering Cursor CLI's communication protocol
+- Built by implementing an OpenCode plugin against Cursor services
 - Uses [Bun](https://bun.sh) for fast TypeScript execution
 - Protocol buffers handled via [@bufbuild/protobuf](https://github.com/bufbuild/protobuf-es)
