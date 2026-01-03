@@ -48,5 +48,10 @@ docs/SESSION_REUSE_IMPLEMENTATION.md
 # Source restoration tooling (keep local only for now)
 scripts/restore.ts
 
+# Debug/probe scripts (keep local only for now)
+scripts/debug-*.ts
+scripts/probe-*.ts
+scripts/test-*.ts
+
 /dist
 !.opencode
