@@ -1,7 +1,6 @@
 /**
  * Generate the exact bytes that test-bidi-chat.ts would send
  */
-import { randomUUID } from 'node:crypto';
 
 // --- Protobuf Encoding Helpers (EXACTLY like test-bidi-chat.ts) ---
 function encodeVarint(value: number | bigint): Uint8Array {
@@ -59,18 +58,21 @@ function concatBytes(...arrays: Uint8Array[]): Uint8Array {
 }
 
 // Use fixed UUIDs for comparison
-const conversationId = "fixed-conv-id-1234";
-const messageId = "fixed-msg-id-5678";
-const workspacePath = "/Users/yukai/Projects/Personal/opencode-cursor-auth";
+const conversationId = 'fixed-conv-id-1234';
+const messageId = 'fixed-msg-id-5678';
+
+const workspacePath = process.env.WORKSPACE_PATH ?? process.cwd();
+const timezone = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
+const shell = process.env.SHELL ?? '/bin/zsh';
 
 console.log('=== test-bidi-chat.ts style message ===');
 
 // Build RequestContextEnv
 const requestContextEnv = concatBytes(
-  encodeStringField(1, `darwin 24.0.0`),           
-  encodeStringField(2, workspacePath),             
-  encodeStringField(3, '/bin/zsh'),                
-  encodeStringField(10, "Asia/Taipei"),
+  encodeStringField(1, 'darwin 24.0.0'),
+  encodeStringField(2, workspacePath),
+  encodeStringField(3, shell),
+  encodeStringField(10, timezone),
   encodeStringField(11, workspacePath),
 );
 
@@ -111,14 +113,18 @@ console.log('First 20 bytes:', Array.from(agentClientMessage.slice(0, 20)).map(b
 // Decode and show structure
 console.log('\n=== Structure breakdown ===');
 console.log('Outer message (AgentClientMessage):');
-console.log(`  field ${agentClientMessage[0]! >> 3} (wire ${agentClientMessage[0]! & 7})`);
+const outerTagByte = agentClientMessage[0];
+if (outerTagByte === undefined) throw new Error('Missing outer tag byte');
+console.log(`  field ${outerTagByte >> 3} (wire ${outerTagByte & 7})`);
 
 // Show raw bytes of conversation_state (field 1 of AgentRunRequest)
 const innerStart = 2; // skip outer tag+length
 console.log(`\nFirst inner field at offset ${innerStart}:`);
-console.log(`  Tag byte: 0x${agentClientMessage[innerStart]?.toString(16).padStart(2, '0')}`);
-console.log(`  Field: ${agentClientMessage[innerStart]! >> 3}, Wire: ${agentClientMessage[innerStart]! & 7}`);
-if ((agentClientMessage[innerStart]! & 7) === 2) {
+const innerTagByte = agentClientMessage[innerStart];
+if (innerTagByte === undefined) throw new Error('Missing inner tag byte');
+console.log(`  Tag byte: 0x${innerTagByte.toString(16).padStart(2, '0')}`);
+console.log(`  Field: ${innerTagByte >> 3}, Wire: ${innerTagByte & 7}`);
+if ((innerTagByte & 7) === 2) {
   const lenByte = agentClientMessage[innerStart + 1];
   console.log(`  Length byte: ${lenByte} (0x${lenByte?.toString(16).padStart(2, '0')})`);
 }
