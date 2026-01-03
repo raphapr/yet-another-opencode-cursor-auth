@@ -192,7 +192,7 @@ A native Cursor provider in OpenCode would provide the fastest possible integrat
 **Status**: Exploratory
 
 - [ ] Direct WebSocket connection to Cursor (bypass gRPC-Web)
-- [ ] Custom Cursor CLI wrapper instead of API reverse-engineering
+- [ ] Custom Cursor CLI wrapper instead of compatibility analysis
 - [ ] Integration with Cursor's VS Code extension protocol
 - [ ] Browser-based proxy using Cursor web interface
 

@@ -1,84 +1,39 @@
-# Authentication Flow Documentation
+# Authentication
 
-This document outlines the authentication mechanisms and flow supported by the Cursor API, as observed during interoperability research.
+This repo implements authentication for an OpenCode plugin that talks to Cursor services.
 
-## Overview
+To keep the public repository low-risk, this document focuses on **how to use the plugin** and **how credentials are handled**, and intentionally avoids publishing deep protocol recipes or derived proprietary implementation details.
 
-The Cursor API supports multiple authentication methods to interact with backend services (`api2.cursor.sh`, `agent.api5.cursor.sh`, etc.). Authentication is primarily token-based (JWT), managed through access and refresh tokens.
+## Supported auth methods
 
-## Authentication Methods
+### 1) Browser-based login (recommended)
+- Initiates an interactive login flow in your browser and polls locally for completion.
+- On success, you get an access token + refresh token that the plugin can reuse.
 
-The following primary ways to authenticate have been identified:
+Quick demo:
 
-### 1. Interactive Login
-*   **Mechanism**: Browser-based OAuth flow with PKCE.
-*   **Flow**:
-    1.  Generate a login URL and open the browser.
-    2.  User completes authentication in the browser.
-    3.  Poll for the authentication result.
-    4.  Store the received access and refresh tokens.
-    5.  Initialize user settings and privacy preferences.
+```bash
+bun run demo:login
+bun run demo:status
+bun run demo:logout
+```
 
-### 2. API Key Authentication
-*   **Usage**: Providing an API key directly.
-*   **Mechanism**: Exchanges the API key for access/refresh tokens.
-*   **Implementation logic**:
-    ```typescript
-    const authResult = await exchangeApiKeyForTokens(apiKey);
-    await storeAuthentication(
-        authResult.accessToken, 
-        authResult.refreshToken, 
-        apiKey
-    );
-    ```
+### 2) API key (optional)
+- If you already have a Cursor API key, the plugin can exchange it for access/refresh credentials.
+- Useful for non-interactive setups.
 
-### 3. Direct Auth Token
-*   **Usage**: Providing a direct JWT token.
-*   **Mechanism**: Bypasses the login flow; uses the provided JWT directly for requests.
-*   **Use Case**: Automated environments, CI/CD pipelines, or debugging scenarios.
+### 3) Provide an access token
+- You can provide an access token via environment variables for local testing.
 
-### 4. Development Login
-*   **Mechanism**: Fetches a development session token from a specialized endpoint (e.g., `/auth/cursor_dev_session_token`).
-*   **Use Case**: Internal testing and local development environments.
+## Credential storage
 
-## Token Management
+Credentials are stored locally using this project’s storage layer (see `src/lib/storage.ts` and the OpenCode plugin integration in `src/plugin/plugin.ts`).
 
-### Token Structure
-*   **Access Token**: A JWT containing user identity claims and expiration timestamps.
-*   **Refresh Token**: Used to obtain new access tokens when the current one expires.
+Guidance:
+- Never commit tokens, cookies, or credential exports to git.
+- Prefer environment variables for ephemeral testing.
 
-### Refresh Logic
-Tokens are typically validated before requests:
+## Troubleshooting
 
-1.  **Expiration Check**: Decodes the JWT payload to check the `exp` claim against the current time.
-2.  **Auto-Refresh**: If a token is near expiration (e.g., within 5 minutes), the refresh token is used to obtain a new access token via the `/auth/refresh` endpoint.
-
-## Request Interceptor
-
-Requests to the API are expected to include several specific headers:
-
-| Header | Description |
-|--------|-------------|
-| `Authorization` | `Bearer <token>` |
-| `x-ghost-mode` | Privacy setting (e.g., `"true"` or `"false"`) |
-| `x-cursor-client-version` | Client identifier string |
-| `x-cursor-client-type` | Client type identifier (typically `"cli"`) |
-| `x-request-id` | A unique UUID for each request |
-
-## Privacy and Endpoint Selection
-
-The API routing can change based on the user's privacy settings:
-
-*   **Default API**: `https://api2.cursor.sh`
-*   **Specialized Backends**: Privacy-sensitive operations may be routed to specific endpoints like `agent.api5.cursor.sh` or `agentn.api5.cursor.sh` depending on whether data storage/training is opted into.
-
-## Environment Variables
-
-The following environment variables are commonly used to configure authentication:
-
-| Variable | Description |
-|----------|-------------|
-| `CURSOR_API_KEY` | API key for authentication |
-| `CURSOR_AUTH_TOKEN` | Direct JWT token for authentication |
-| `CURSOR_API_ENDPOINT` | Override default API endpoint |
-| `CURSOR_PRIVACY_CACHE_MAX_AGE_MS` | TTL for cached privacy settings |
+- If requests start failing unexpectedly, re-run `bun run demo:login` to refresh credentials.
+- If you suspect stale credentials, run `bun run demo:logout` and log in again.
