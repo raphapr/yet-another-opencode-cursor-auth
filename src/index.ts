@@ -192,7 +192,7 @@ export class CursorAuthPlugin {
 
       // Set additional headers
       req.headers.set("x-ghost-mode", "true");
-      req.headers.set("x-cursor-client-version", "opencode-cursor-auth");
+      req.headers.set("x-cursor-client-version", "yet-another-opencode-cursor-auth");
       req.headers.set("x-cursor-client-type", "cli");
 
       if (!req.headers.get("x-request-id")) {
@@ -292,7 +292,7 @@ export {
   CursorOAuthPlugin,
   CursorCLIOAuthPlugin,
   CURSOR_PROVIDER_ID,
-} from "./plugin";
+} from "./plugin/index.js";
 
 export type {
   PluginContext,
@@ -305,7 +305,7 @@ export type {
   OAuthAuthDetails,
   AuthMethod,
   TokenExchangeResult,
-} from "./plugin";
+} from "./plugin/index.js";
 
 // --- Default Export ---
 

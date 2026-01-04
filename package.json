@@ -1,5 +1,5 @@
 {
-  "name": "opencode-cursor-auth",
+  "name": "yet-another-opencode-cursor-auth",
   "version": "0.1.0",
   "description": "OpenAI-compatible proxy server for Cursor's AI backend with full tool calling support",
   "author": "Yukai Huang",
@@ -28,7 +28,7 @@
     }
   },
   "scripts": {
-    "build": "bun x tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && bun x tsc -p tsconfig.build.json",
     "start": "bun run src/server.ts",
     "server": "bun run src/server.ts",
     "proxy": "bun run src/server.ts",

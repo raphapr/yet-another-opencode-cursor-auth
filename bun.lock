@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-cursor-auth",
+      "name": "yet-another-opencode-cursor-auth",
       "dependencies": {
         "@anthropic-ai/tokenizer": "^0.0.4",
         "@babel/generator": "^7.28.5",

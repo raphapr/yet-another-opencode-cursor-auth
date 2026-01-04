@@ -8,7 +8,7 @@ export {
   CursorOAuthPlugin,
   CursorCLIOAuthPlugin,
   CURSOR_PROVIDER_ID,
-} from "./plugin";
+} from "./plugin.js";
 
 export type {
   PluginContext,
@@ -32,4 +32,4 @@ export type {
 } from "./types";
 
 // Default export is the main plugin factory
-export { CursorOAuthPlugin as default } from "./plugin";
+export { CursorOAuthPlugin as default } from "./plugin.js";

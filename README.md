@@ -25,7 +25,7 @@ An OpenCode plugin that enables using Cursor's AI backend with OpenCode, featuri
 
 > **📦 Package Not Yet Published**
 >
-> The npm package `opencode-cursor-auth` is not yet published to npm. For now, you'll need to:
+> The npm package `yet-another-opencode-cursor-auth` is not yet published to npm. For now, you'll need to:
 > - Clone this repository and use local development setup, or
 > - Reference the GitHub repository directly in your dependencies
 
@@ -55,7 +55,7 @@ bun link
 Then in your project:
 
 ```bash
-bun link opencode-cursor-auth
+bun link yet-another-opencode-cursor-auth
 ```
 
 ### Option 2: GitHub Dependency
@@ -65,7 +65,7 @@ Add directly from GitHub in your `package.json`:
 ```json
 {
   "dependencies": {
-    "opencode-cursor-auth": "github:Yukaii/opencode-cursor-auth"
+    "yet-another-opencode-cursor-auth": "github:Yukaii/opencode-cursor-auth"
   }
 }
 ```
@@ -75,7 +75,7 @@ Add directly from GitHub in your `package.json`:
 Create `.opencode/plugins/cursor-auth.ts`:
 
 ```typescript
-export { CursorOAuthPlugin } from "opencode-cursor-auth";
+export { CursorOAuthPlugin } from "yet-another-opencode-cursor-auth";
 ```
 
 Add to your `opencode.json`:
