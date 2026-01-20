@@ -277,6 +277,7 @@ interface StreamParams {
 
 async function streamChatCompletion(params: StreamParams): Promise<Response> {
   const { client, prompt, model, tools, toolsProvided, messages, completionId, created, log } = params;
+  const providedToolNames = new Set((tools ?? []).map((tool) => tool.function.name));
 
   // Route to session reuse if:
   // 1. Tools are provided (new request that may result in tool calls), OR
@@ -360,53 +361,56 @@ async function streamChatCompletion(params: StreamParams): Promise<Response> {
               continue;
             }
 
-            // Emit exec requests as OpenAI tool calls when tools are provided
-            if (toolsProvided) {
-              const { toolName, toolArgs } = mapExecRequestToTool(execReq);
-              if (toolName && toolArgs) {
-                const currentIndex = mcpToolCallIndex++;
-                const openaiToolCallId = generateToolCallId(completionId, currentIndex);
+            const { toolName, toolArgs } = mapExecRequestToTool(execReq);
+            const toolAvailable = toolName ? providedToolNames.has(toolName) : false;
 
-                log(`[OpenAI Compat] Emitting tool call: ${toolName} (type: ${execReq.type})`);
+            // Emit exec requests as OpenAI tool calls when tools are provided and tool exists
+            if (toolsProvided && toolName && toolArgs && toolAvailable) {
+              const currentIndex = mcpToolCallIndex++;
+              const openaiToolCallId = generateToolCallId(completionId, currentIndex);
 
-                // Emit the tool call
-                const toolCallChunk: OpenAIStreamChunk = {
-                  id: completionId,
-                  object: "chat.completion.chunk",
-                  created,
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: currentIndex,
-                        id: openaiToolCallId,
-                        type: "function",
-                        function: {
-                          name: toolName,
-                          arguments: JSON.stringify(toolArgs),
-                        },
-                      }],
-                    },
-                    finish_reason: null,
-                  }],
-                };
-                controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
+              log(`[OpenAI Compat] Emitting tool call: ${toolName} (type: ${execReq.type})`);
 
-                // Emit finish with tool_calls reason
-                controller.enqueue(encoder.encode(createSSEChunk(
-                  createStreamChunk(completionId, model, created, {}, "tool_calls")
-                )));
+              // Emit the tool call
+              const toolCallChunk: OpenAIStreamChunk = {
+                id: completionId,
+                object: "chat.completion.chunk",
+                created,
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: currentIndex,
+                      id: openaiToolCallId,
+                      type: "function",
+                      function: {
+                        name: toolName,
+                        arguments: JSON.stringify(toolArgs),
+                      },
+                    }],
+                  },
+                  finish_reason: null,
+                }],
+              };
+              controller.enqueue(encoder.encode(createSSEChunk(toolCallChunk)));
 
-                controller.enqueue(encoder.encode(createSSEDone()));
-                isClosed = true;
-                controller.close();
-                return;
-              }
+              // Emit finish with tool_calls reason
+              controller.enqueue(encoder.encode(createSSEChunk(
+                createStreamChunk(completionId, model, created, {}, "tool_calls")
+              )));
+
+              controller.enqueue(encoder.encode(createSSEDone()));
+              isClosed = true;
+              controller.close();
+              return;
             }
 
-            // Execute built-in tools internally when no tools provided
-            if (!toolsProvided && execReq.type !== "mcp") {
+            if (execReq.type === "mcp") {
+              if (toolName) {
+                log(`[OpenAI Compat] MCP tool not provided: ${toolName}`);
+              }
+            } else {
               await executeBuiltinTool(client, execReq, log);
             }
           } else if (chunk.type === "error") {
@@ -458,6 +462,7 @@ async function streamChatCompletion(params: StreamParams): Promise<Response> {
 
 async function streamChatCompletionWithSessionReuse(params: StreamParams): Promise<Response> {
   const { client, prompt, model, tools, messages, completionId, created, log } = params;
+  const providedToolNames = new Set((tools ?? []).map((tool) => tool.function.name));
 
   await cleanupExpiredSessions(
     sessionMap as unknown as Map<string, { iterator?: AsyncIterator<unknown>; lastActivity: number }>,
@@ -645,7 +650,8 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
             }
 
             const { toolName, toolArgs } = mapExecRequestToTool(execReq);
-            if (toolName && toolArgs) {
+            const toolAvailable = toolName ? providedToolNames.has(toolName) : false;
+            if (toolName && toolArgs && toolAvailable) {
               const currentIndex = mcpToolCallIndex++;
               const callBase = selectCallBase(execReq);
               const toolCallId = makeToolCallId(sessionId, callBase);
@@ -691,7 +697,13 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
               return;
             }
 
-            await executeBuiltinTool(client, execReq, log);
+            if (execReq.type === "mcp") {
+              if (toolName) {
+                log(`[Session ${sessionId}] MCP tool not provided: ${toolName}`);
+              }
+            } else {
+              await executeBuiltinTool(client, execReq, log);
+            }
             continue;
           }
 
