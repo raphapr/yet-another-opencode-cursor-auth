@@ -104,3 +104,22 @@ export function calculateTokenUsage(
     total_tokens: promptTokens + completionTokens,
   };
 }
+
+/**
+ * Fast token usage estimate using character-based heuristic.
+ * Avoids expensive tokenizer calls - suitable for streaming responses
+ * where exact counts are not needed (Cursor handles billing server-side).
+ */
+export function calculateTokenUsageFast(
+  promptLength: number,
+  completionLength: number,
+): TokenUsage {
+  const promptTokens = Math.ceil(promptLength / 4);
+  const completionTokens = Math.ceil(completionLength / 4);
+  
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
+}

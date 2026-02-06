@@ -136,7 +136,10 @@ export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const AGENT_PRIVACY_URL = "https://agent.api5.cursor.sh";
 export const AGENT_NON_PRIVACY_URL = "https://agentn.api5.cursor.sh";
 
+let cachedAgentVersion: string | undefined | null = null; // null = not yet detected
+
 function detectLatestInstalledAgentVersion(): string | undefined {
+  if (cachedAgentVersion !== null) return cachedAgentVersion;
   try {
     const versionsDir = join(homedir(), ".local", "share", "cursor-agent", "versions");
     const entries = readdirSync(versionsDir, { withFileTypes: true })
@@ -145,14 +148,20 @@ function detectLatestInstalledAgentVersion(): string | undefined {
       .sort();
 
     const latest = entries.at(-1);
-    return latest ? `cli-${latest}` : undefined;
+    cachedAgentVersion = latest ? `cli-${latest}` : undefined;
+    return cachedAgentVersion;
   } catch {
+    cachedAgentVersion = undefined;
     return undefined;
   }
 }
 
+let cachedClientVersionHeader: string | null = null;
+
 function resolveClientVersionHeader(): string {
-  return process.env.CURSOR_CLIENT_VERSION ?? detectLatestInstalledAgentVersion() ?? "cli-unknown";
+  if (cachedClientVersionHeader) return cachedClientVersionHeader;
+  cachedClientVersionHeader = process.env.CURSOR_CLIENT_VERSION ?? detectLatestInstalledAgentVersion() ?? "cli-unknown";
+  return cachedClientVersionHeader;
 }
 
 function parseTrailerMetadata(trailer: string): Record<string, string> {
@@ -362,7 +371,7 @@ export class AgentServiceClient {
    * Call BidiAppend to send a client message
    */
   private async bidiAppend(requestId: string, appendSeqno: bigint, data: Uint8Array): Promise<void> {
-    const startTime = Date.now();
+    const startTime = DEBUG ? Date.now() : 0;
     const hexData = Buffer.from(data).toString("hex");
     const appendRequest = encodeBidiAppendRequest(hexData, requestId, appendSeqno);
     const envelope = addConnectEnvelope(appendRequest);
@@ -371,7 +380,7 @@ export class AgentServiceClient {
 
     const url = `${this.baseUrl}/aiserver.v1.BidiService/BidiAppend`;
 
-    const fetchStart = Date.now();
+    const fetchStart = DEBUG ? Date.now() : 0;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getHeaders(requestId),
@@ -384,23 +393,24 @@ export class AgentServiceClient {
       throw new Error(`BidiAppend failed: ${response.status} - ${errorText}`);
     }
 
-    // Read the response body to see if there's any useful information
-    const responseBody = await response.arrayBuffer();
-    if (responseBody.byteLength > 0) {
-      debugLog(`[DEBUG] BidiAppend response: ${responseBody.byteLength} bytes`);
-      const bytes = new Uint8Array(responseBody);
-      // Parse as gRPC-Web envelope
-      if (bytes.length >= 5) {
-        const flags = bytes[0] ?? 0;
-        const b1 = bytes[1] ?? 0;
-        const b2 = bytes[2] ?? 0;
-        const b3 = bytes[3] ?? 0;
-        const b4 = bytes[4] ?? 0;
-        const length = (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
-        debugLog(`[DEBUG] BidiAppend response: flags=${flags}, length=${length}, totalBytes=${bytes.length}`);
-        if (length > 0 && bytes.length >= 5 + length) {
-          const payload = bytes.slice(5, 5 + length);
-          debugLog(`[DEBUG] BidiAppend payload hex: ${Buffer.from(payload).toString('hex')}`);
+    // Only read and parse the response body when debug logging is enabled
+    if (DEBUG) {
+      const responseBody = await response.arrayBuffer();
+      if (responseBody.byteLength > 0) {
+        debugLog(`[DEBUG] BidiAppend response: ${responseBody.byteLength} bytes`);
+        const bytes = new Uint8Array(responseBody);
+        if (bytes.length >= 5) {
+          const flags = bytes[0] ?? 0;
+          const b1 = bytes[1] ?? 0;
+          const b2 = bytes[2] ?? 0;
+          const b3 = bytes[3] ?? 0;
+          const b4 = bytes[4] ?? 0;
+          const length = (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
+          debugLog(`[DEBUG] BidiAppend response: flags=${flags}, length=${length}, totalBytes=${bytes.length}`);
+          if (length > 0 && bytes.length >= 5 + length) {
+            const payload = bytes.slice(5, 5 + length);
+            debugLog(`[DEBUG] BidiAppend payload hex: ${Buffer.from(payload).toString('hex')}`);
+          }
         }
       }
     }
@@ -832,7 +842,9 @@ export class AgentServiceClient {
       }
 
       const reader = sseResponse.body.getReader();
-      let buffer = new Uint8Array(0);
+      // Growing buffer: track used length separately to avoid O(n^2) copies
+      let buffer = new Uint8Array(8192);
+      let bufferUsed = 0;
       let turnEnded = false;
       let firstContentLogged = false;
       let hasStreamedText = false; // Track if we received any text via streaming
@@ -855,15 +867,21 @@ export class AgentServiceClient {
             firstContentLogged = true;
           }
 
-          // Append to buffer
-          const newBuffer = new Uint8Array(buffer.length + value.length);
-          newBuffer.set(buffer);
-          newBuffer.set(value, buffer.length);
-          buffer = newBuffer;
+          // Append to growing buffer - double capacity when needed
+          const needed = bufferUsed + value.length;
+          if (needed > buffer.length) {
+            let newSize = buffer.length;
+            while (newSize < needed) newSize *= 2;
+            const grown = new Uint8Array(newSize);
+            grown.set(buffer.subarray(0, bufferUsed));
+            buffer = grown;
+          }
+          buffer.set(value, bufferUsed);
+          bufferUsed += value.length;
 
           // Parse frames
           let offset = 0;
-          while (offset + 5 <= buffer.length) {
+          while (offset + 5 <= bufferUsed) {
             const flags = buffer[offset] ?? 0;
             const b1 = buffer[offset + 1] ?? 0;
             const b2 = buffer[offset + 2] ?? 0;
@@ -871,7 +889,7 @@ export class AgentServiceClient {
             const b4 = buffer[offset + 4] ?? 0;
             const length = (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
 
-            if (offset + 5 + length > buffer.length) break;
+            if (offset + 5 + length > bufferUsed) break;
 
             const frameData = buffer.slice(offset + 5, offset + 5 + length);
             offset += 5 + length;
@@ -1154,7 +1172,14 @@ export class AgentServiceClient {
             }
           }
 
-          buffer = buffer.slice(offset);
+          // Compact: shift unconsumed bytes to front instead of allocating new array
+          if (offset > 0) {
+            const remaining = bufferUsed - offset;
+            if (remaining > 0) {
+              buffer.copyWithin(0, offset, bufferUsed);
+            }
+            bufferUsed = remaining;
+          }
         }
 
         // Clean exit - check for KV blob assistant responses if no text was streamed

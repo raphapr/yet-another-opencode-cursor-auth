@@ -34,7 +34,10 @@ import {
   createStreamChunk,
   generateToolCallId,
 } from "./utils";
-import { calculateTokenUsage } from "../utils/tokenizer";
+import { calculateTokenUsageFast } from "../utils/tokenizer";
+import { readdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { mkdir } from "node:fs/promises";
 import type { CursorModelInfo } from "../api/cursor-models";
 import {
   cleanupExpiredSessions,
@@ -49,9 +52,11 @@ import {
 // --- Model Cache ---
 interface ModelCache {
   models: CursorModelInfo[] | null;
+  /** Map from modelId/displayModelId/alias -> resolved modelId for O(1) lookups */
+  resolveMap: Map<string, string> | null;
   time: number;
 }
-const modelCache: ModelCache = { models: null, time: 0 };
+const modelCache: ModelCache = { models: null, resolveMap: null, time: 0 };
 const MODEL_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 const SESSION_REUSE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -59,6 +64,26 @@ const sessionMap = new Map<string, SessionLike>();
 
 function sessionReuseEnabled(): boolean {
   return process.env.CURSOR_SESSION_REUSE !== "0";
+}
+
+/**
+ * Build a Map for O(1) model name resolution
+ */
+function buildResolveMap(models: CursorModelInfo[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const m of models) {
+    // modelId -> modelId
+    map.set(m.modelId, m.modelId);
+    // displayModelId -> modelId
+    if (m.displayModelId) {
+      map.set(m.displayModelId, m.modelId);
+    }
+    // aliases -> modelId
+    for (const alias of m.aliases) {
+      map.set(alias, m.modelId);
+    }
+  }
+  return map;
 }
 
 /**
@@ -73,34 +98,20 @@ async function getCachedModels(accessToken: string): Promise<CursorModelInfo[]> 
   const cursorClient = new CursorClient(accessToken);
   const models = await listCursorModels(cursorClient);
   modelCache.models = models;
+  modelCache.resolveMap = buildResolveMap(models);
   modelCache.time = now;
   return models;
 }
 
 /**
  * Resolve a requested model name to its internal model ID
- * Maps displayModelId/aliases to the actual modelId used by the agent service
+ * Uses pre-built Map for O(1) lookups instead of O(n) array scans
  */
-function resolveModel(requestedModel: string, models: CursorModelInfo[]): string {
-  // Direct match on modelId
-  const directMatch = models.find(m => m.modelId === requestedModel);
-  if (directMatch) {
-    return directMatch.modelId;
+function resolveModel(requestedModel: string, _models: CursorModelInfo[]): string {
+  if (modelCache.resolveMap) {
+    return modelCache.resolveMap.get(requestedModel) ?? requestedModel;
   }
-
-  // Match on displayModelId
-  const displayMatch = models.find(m => m.displayModelId === requestedModel);
-  if (displayMatch) {
-    return displayMatch.modelId;
-  }
-
-  // Match on aliases
-  const aliasMatch = models.find(m => m.aliases.includes(requestedModel));
-  if (aliasMatch) {
-    return aliasMatch.modelId;
-  }
-
-  // No match found, return as-is (let Cursor API handle it)
+  // Fallback: return as-is (let Cursor API handle it)
   return requestedModel;
 }
 
@@ -235,7 +246,7 @@ async function handleChatCompletions(
   // Non-streaming response
   try {
     const content = await client.chat({ message: prompt, model, mode: AgentMode.AGENT, tools });
-    const usage = calculateTokenUsage(prompt, content, model);
+    const usage = calculateTokenUsageFast(prompt.length, content.length);
 
     return new Response(JSON.stringify({
       id: completionId,
@@ -303,7 +314,7 @@ async function streamChatCompletion(params: StreamParams): Promise<Response> {
   let isClosed = false;
   let mcpToolCallIndex = 0;
   let pendingEditToolCall: string | null = null;
-  let accumulatedContent = "";
+  let accumulatedContentLength = 0;
 
   const readable = new ReadableStream({
     async start(controller) {
@@ -319,14 +330,14 @@ async function streamChatCompletion(params: StreamParams): Promise<Response> {
 
           if (chunk.type === "text" || chunk.type === "token") {
             if (chunk.content) {
-              accumulatedContent += chunk.content;
+              accumulatedContentLength += chunk.content.length;
               controller.enqueue(encoder.encode(createSSEChunk(
                 createStreamChunk(completionId, model, created, { content: chunk.content })
               )));
             }
           } else if (chunk.type === "kv_blob_assistant" && chunk.blobContent) {
             log("[OpenAI Compat] Emitting assistant content from KV blob");
-            accumulatedContent += chunk.blobContent;
+            accumulatedContentLength += chunk.blobContent.length;
             controller.enqueue(encoder.encode(createSSEChunk(
               createStreamChunk(completionId, model, created, { content: chunk.blobContent })
             )));
@@ -425,7 +436,7 @@ async function streamChatCompletion(params: StreamParams): Promise<Response> {
 
         // Send final chunk with usage
         if (!isClosed) {
-          const usage = calculateTokenUsage(prompt, accumulatedContent, model);
+          const usage = calculateTokenUsageFast(prompt.length, accumulatedContentLength);
           const finalChunk: OpenAIStreamChunk = {
             id: completionId,
             object: "chat.completion.chunk",
@@ -473,7 +484,7 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
   let isClosed = false;
   let mcpToolCallIndex = 0;
   let pendingEditToolCall: string | null = null;
-  let accumulatedContent = "";
+  let accumulatedContentLength = 0;
 
   // ARCHITECTURAL NOTE: We always start fresh requests when tool results arrive.
   // See session-reuse.ts for detailed explanation of why true session reuse isn't possible.
@@ -551,7 +562,7 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
 
           if (done) {
             sessionMap.delete(sessionId);
-            const usage = calculateTokenUsage(prompt, accumulatedContent, model);
+            const usage = calculateTokenUsageFast(prompt.length, accumulatedContentLength);
             const finalChunk: OpenAIStreamChunk = {
               id: completionId,
               object: "chat.completion.chunk",
@@ -584,7 +595,7 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
 
           if (chunk.type === "text" || chunk.type === "token") {
             if (chunk.content) {
-              accumulatedContent += chunk.content;
+              accumulatedContentLength += chunk.content.length;
               activeSession.lastActivity = Date.now();
               controller.enqueue(
                 encoder.encode(
@@ -596,7 +607,7 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
           }
 
           if (chunk.type === "kv_blob_assistant" && chunk.blobContent) {
-            accumulatedContent += chunk.blobContent;
+            accumulatedContentLength += chunk.blobContent.length;
             session.lastActivity = Date.now();
             controller.enqueue(
               encoder.encode(
@@ -727,7 +738,7 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
           }
         }
 
-        const usage = calculateTokenUsage(prompt, accumulatedContent, model);
+        const usage = calculateTokenUsageFast(prompt.length, accumulatedContentLength);
         const finalChunk: OpenAIStreamChunk = {
           id: completionId,
           object: "chat.completion.chunk",
@@ -802,7 +813,6 @@ async function executeBuiltinTool(
     }
   } else if (execReq.type === "ls") {
     try {
-      const { readdir } = await import("node:fs/promises");
       const entries = await readdir(execReq.path, { withFileTypes: true });
       const files = entries.map(e => e.isDirectory() ? `${e.name}/` : e.name).join("\n");
       await client.sendLsResult(execReq.id, execReq.execId, files);
@@ -827,8 +837,6 @@ async function executeBuiltinTool(
     }
   } else if (execReq.type === "write") {
     try {
-      const { dirname } = await import("node:path");
-      const { mkdir } = await import("node:fs/promises");
       const dir = dirname(execReq.path);
       await mkdir(dir, { recursive: true });
 
