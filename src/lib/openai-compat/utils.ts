@@ -95,28 +95,56 @@ export function mapExecRequestToTool(execReq: ExecRequest): {
   toolArgs: Record<string, unknown> | null;
 } {
   if (execReq.type === "shell") {
-    const toolArgs: Record<string, unknown> = { command: execReq.command };
+    const cmdPreview = execReq.command.length > 60 
+      ? `${execReq.command.slice(0, 60)}...` 
+      : execReq.command;
+    const toolArgs: Record<string, unknown> = { 
+      command: execReq.command,
+      description: `Execute shell command: ${cmdPreview}`
+    };
     if (execReq.cwd) toolArgs.cwd = execReq.cwd;
     return { toolName: "bash", toolArgs };
   }
   if (execReq.type === "read") {
-    return { toolName: "read", toolArgs: { filePath: execReq.path } };
+    return { 
+      toolName: "read", 
+      toolArgs: { 
+        filePath: execReq.path
+      } 
+    };
   }
   if (execReq.type === "ls") {
-    return { toolName: "list", toolArgs: { path: execReq.path } };
+    return { 
+      toolName: "list", 
+      toolArgs: { 
+        path: execReq.path
+      } 
+    };
   }
   if (execReq.type === "grep") {
     const toolName = execReq.glob ? "glob" : "grep";
     const toolArgs = execReq.glob
-      ? { pattern: execReq.glob, path: execReq.path }
-      : { pattern: execReq.pattern, path: execReq.path };
+      ? { 
+          pattern: execReq.glob, 
+          path: execReq.path
+        }
+      : { 
+          pattern: execReq.pattern, 
+          path: execReq.path
+        };
     return { toolName, toolArgs };
   }
   if (execReq.type === "mcp") {
     return { toolName: execReq.toolName, toolArgs: execReq.args as Record<string, unknown> };
   }
   if (execReq.type === "write") {
-    return { toolName: "write", toolArgs: { filePath: execReq.path, content: execReq.fileText } };
+    return { 
+      toolName: "write", 
+      toolArgs: { 
+        filePath: execReq.path, 
+        content: execReq.fileText
+      } 
+    };
   }
   return { toolName: null, toolArgs: null };
 }
